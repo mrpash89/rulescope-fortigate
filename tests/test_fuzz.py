@@ -258,10 +258,11 @@ class FuzzTests(unittest.TestCase):
     def test_source_has_no_invisible_characters(self):
         """Direction marks or zero-width characters in source make code read differently than it runs."""
         root = os.path.dirname(HERE)
-        for folder in ("rulescope", "tests", "deploy", "examples", ".github"):
+        for folder in ("rulescope", "tests", "deploy", "examples", "website", ".github"):
             for dirpath, _, files in os.walk(os.path.join(root, folder)):
                 for name in files:
-                    if not name.endswith((".py", ".yml", ".service", ".conf", ".example", ".ini", ".toml")):
+                    if not name.endswith((".py", ".yml", ".service", ".timer", ".conf", ".example", ".ini", ".toml", ".html",
+                                          "Caddyfile")):
                         continue
                     path = os.path.join(dirpath, name)
                     with open(path, encoding="utf-8") as fh:

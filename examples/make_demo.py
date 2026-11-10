@@ -13,7 +13,8 @@ sys.path.insert(0, ROOT)
 from rulescope import fleet  # noqa: E402
 
 
-def main(out: str) -> None:
+def main(out: str, advisor=None) -> None:
+    """`advisor`: an optional firmware.AdvisoryClient, to include known CVEs for the demo's FortiOS versions."""
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
     with open(os.path.join(ROOT, "tests", "sample.conf"), encoding="utf-8") as fh:
@@ -39,7 +40,7 @@ def main(out: str) -> None:
                              f"[Branch-South]\nconfig = {south_p}\nlabel = Branch South\ngroup = Branches\n")
     devices = fleet.load_inventory(inv)
     site, snaps = os.path.join(out, "site"), os.path.join(out, "snapshots")
-    fleet.run(devices, site, snaps, auditor="Demo auditor")
+    fleet.run(devices, site, snaps, auditor="Demo auditor", advisor=advisor)
 
     # Second run: someone opens SSH on a WAN interface and adds an admin; another site fixes logging.
     s = open(south_p, encoding="utf-8").read()
@@ -48,7 +49,7 @@ def main(out: str) -> None:
                                        '        set vdom "root"\n    next\n    edit "pavel"', 1)
     write("south.conf", s)
     write("north.conf", north.replace("        set logtraffic disable\n", "        set logtraffic all\n", 1))
-    fleet.run(devices, site, snaps, auditor="Demo auditor")
+    fleet.run(devices, site, snaps, auditor="Demo auditor", advisor=advisor)
     print(os.path.join(site, "index.html"))
 
 
