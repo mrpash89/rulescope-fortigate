@@ -279,6 +279,8 @@ def p_breadth(c: Ctx) -> R:
         rules = sorted({f["policyid"] for f in fs if f["policyid"] is not None})
         return "fail", (f"{_plural(len(rules), 'accept rule')} allow all services or all addresses: "
                         f"{', '.join('#' + str(x) for x in rules[:8])}{' and more' if len(rules) > 8 else ''}.")
+    if not c.result.get("policy_coverage_complete"):
+        return "unknown", "Policy matching criteria were incomplete; broad-match checks could not be fully assessed."
     return "pass", "No accept rule uses service ALL with unrestricted addresses."
 
 
@@ -294,6 +296,8 @@ def p_unused(c: Ctx) -> R:
         return "unknown", "No usage data: zero-hit rules could not be identified (use the API or --usage)."
     if soft:
         return "partial", f"{_plural(len(soft), 'rule')} stale or disabled."
+    if not c.result.get("policy_coverage_complete"):
+        return "unknown", "Recent usage is available, but redundancy and shadow coverage could not be fully assessed."
     return "pass", "Every enabled rule has recent hits and none is redundant or shadowed."
 
 

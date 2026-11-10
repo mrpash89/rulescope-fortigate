@@ -254,7 +254,7 @@ class AnalysisTests(unittest.TestCase):
         up = model.upgrade(old)
         self.assertEqual(up["schema"], model.SCHEMA)
         res = checks.analyze(up)
-        self.assertIn("SHADOW_CONFLICT", by_check(res))
+        self.assertNotIn("SHADOW_CONFLICT", by_check(res))
 
 
 class UsageTests(unittest.TestCase):

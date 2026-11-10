@@ -1,4 +1,4 @@
-"""Normalized snapshot model (schema 3).
+"""Normalized snapshot model (schema 4).
 
 Both input paths (a config backup file, or the live REST API) are converted into the
 same plain-JSON snapshot, so the analysis, report and diff code never care where the
@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from . import fgtconf
 from .safety import clean_tree
 
-SCHEMA = 3
+SCHEMA = 4
 
 POLICY_LIST_FIELDS = [
     "srcintf", "dstintf", "srcaddr", "dstaddr", "srcaddr6", "dstaddr6", "service",
@@ -36,6 +36,16 @@ POLICY_DEFAULTS = {
     "application-list": "", "emailfilter-profile": "", "file-filter-profile": "",
     "profile-group": "", "profile-type": "single", "match-vip": "disable",
 }
+
+# Preserve criterion names only: their values are not needed to decline a coverage proof.
+UNSUPPORTED_MATCH_LIST_FIELDS = [
+    "ztna-ems-tag", "ztna-ems-tag-secondary", "ztna-geo-tag", "src-vendor-mac",
+    "internet-service6-name", "internet-service6-group", "internet-service6-custom",
+    "internet-service6-custom-group", "internet-service6-id",
+    "internet-service6-src-name", "internet-service6-src-group", "internet-service6-src-custom",
+    "internet-service6-src-custom-group", "internet-service6-src-id",
+]
+UNSUPPORTED_MATCH_FLAGS = ["ztna-status", "internet-service6", "internet-service6-src"]
 
 PROFILE_FIELDS = ["av-profile", "webfilter-profile", "dnsfilter-profile", "ips-sensor",
                   "application-list", "emailfilter-profile", "file-filter-profile", "profile-group"]
@@ -110,6 +120,9 @@ def _policy(pid: Any, raw: Dict[str, Any]) -> Dict[str, Any]:
         p[f] = _names(raw.get(f))
     for f, d in POLICY_DEFAULTS.items():
         p[f] = _scalar(raw.get(f), d)
+    p["unsupported_match"] = sorted(
+        [f for f in UNSUPPORTED_MATCH_LIST_FIELDS if any(_names(raw.get(f)))]
+        + [f for f in UNSUPPORTED_MATCH_FLAGS if _scalar(raw.get(f), "disable") not in ("", "disable")])
     return p
 
 
@@ -294,7 +307,7 @@ def upgrade(snap: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError(f"{collection}[{index}].policyid must be an integer")
     if snap.get("schema") == SCHEMA:
         return snap
-    if snap.get("schema") not in (1, 2):
+    if snap.get("schema") not in (1, 2, 3):
         raise ValueError(f"unsupported snapshot schema {snap.get('schema')}")
     base = empty_snapshot(snap.get("source", "config"))
     for k, v in base.items():
@@ -303,6 +316,9 @@ def upgrade(snap: Dict[str, Any]) -> Dict[str, Any]:
         snap["vips"] = {n: _vip(n, {}) for n in snap["vips"]}
     for i in snap["interfaces"].values():
         i.setdefault("mode", "static")
+    # Earlier schemas discarded these criteria; a missing restriction cannot be reconstructed.
+    for p in snap["policies"]:
+        p["unsupported_match"] = None
     snap["schema"] = SCHEMA
     return snap
 

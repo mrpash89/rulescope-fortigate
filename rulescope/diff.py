@@ -110,7 +110,10 @@ def diff_snapshots(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
     }
     for k in np_:
         if k in op:
-            ch = _fields_changed(op[k], np_[k], POLICY_IGNORE)
+            ignore = POLICY_IGNORE
+            if op[k].get("unsupported_match") is None or np_[k].get("unsupported_match") is None:
+                ignore = ignore | {"unsupported_match"}
+            ch = _fields_changed(op[k], np_[k], ignore)
             if ch:
                 res["policies"]["modified"].append({"policy": np_[k], "changes": ch})
     for k in _moved([_pkey(p) for p in old["policies"]], [_pkey(p) for p in new["policies"]]):

@@ -248,6 +248,7 @@ Found a security problem? Report it privately to the maintainer rather than in a
 - Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet.
 - Security profiles are checked for presence and botnet blocking, not for full quality (an IPS sensor in monitor mode still counts as IPS).
 - Partial overlaps (rule B only partly covered by A) are not reported, only full coverage.
+- Redundancy, shadow and broad-match checks exclude policies with unsupported ZTNA tags, IPv6 Internet Service or vendor-MAC matching, or address/service negation. Snapshots use schema 4 and retain only the unsupported criterion names. Coverage in schema 1–3 snapshots is unknown because those criteria were discarded; import the original backup or collect again to assess it. Other analysis continues, and excluded policies do not contribute coverage-based cleanup recommendations. Comparisons omit these findings unless both runs fully assessed matching; older findings JSON without completeness information is also excluded.
 - Config backups omit default values. rulescope fills in FortiOS defaults where they are known for the version; where a default differs between versions and is not known (for example admin TLS versions before 7.0), the setting is marked not assessed instead of guessed.
 - The REST API paths are validated against a mock; check your first live run's notes for endpoints your FortiOS version names differently.
 
