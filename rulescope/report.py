@@ -4,13 +4,13 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import io
+import re
+import unicodedata
 from collections import OrderedDict
 from html import escape
 from typing import Any, Dict, List, Optional
 
-import re
-
-from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER
+from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER, q
 from .safety import clean, clean_multiline, csv_cell
 
 def _e(x: Any) -> str:
@@ -52,13 +52,31 @@ def internet_services(result: Dict[str, Any]) -> int:
 
 # ---------------------------------------------------------------- remediation CLI
 
+def _cli_unsafe(text: Any) -> bool:
+    """Control, format and line/paragraph separator characters: never allowed in a command line."""
+    return any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in str(text))
+
+
+def _cli_comment(text: Any) -> str:
+    """Comment lines for any text: every physical line gets '# ', controls are shown as escapes."""
+    return "\n".join("# " + "".join(c.encode("unicode_escape").decode("ascii") if _cli_unsafe(c) else c
+                                    for c in line) for line in (str(text).splitlines() or [""]))
+
+
 def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_only: bool = False,
                     title: str = "remediation") -> str:
+    """FortiOS script for the findings. Text from the config only ever appears in comments or quoted
+    values; a block whose commands contain control characters is withheld rather than repaired, and
+    guard_script() disables any line that is not a statement rulescope generates."""
     dev = result["device"]
+    multi = dev.get("multi_vdom")
+    vdom = dev.get("vdom", "root")
+    valid_vdom = isinstance(vdom, str) and bool(vdom.strip()) and not _cli_unsafe(vdom)
     lines = [
-        f"# rulescope {title} script",
-        f"# Device: {dev.get('hostname') or '-'}  {dev.get('model', '')} {dev.get('version', '')}  VDOM: {dev.get('vdom')}",
-        f"# Generated: {result['collected_at']}",
+        _cli_comment(f"rulescope {title} script"),
+        _cli_comment(f"Device: {dev.get('hostname') or '-'}  {dev.get('model', '')} {dev.get('version', '')}  "
+                     f"VDOM: {vdom}"),
+        _cli_comment(f"Generated: {result['collected_at']}"),
         "#",
         "# REVIEW EVERY BLOCK BEFORE APPLYING. Take a config backup first.",
         "# Lines prefixed with '#' change traffic behaviour, VPN peers or management reachability",
@@ -68,6 +86,7 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
     ]
     vdom_blocks: List[str] = []
     global_blocks: List[str] = []
+    withheld_blocks: List[str] = []
     seen = set()
     for check, items in _grouped(result["findings"]).items():
         if only is not None and check not in only:
@@ -77,14 +96,20 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
             if not f["cli"] or key in seen or (safe_only and not f["cli_safe"]):
                 continue
             seen.add(key)
-            block = [f"# [{f['severity'].upper()}] {CHECKS[check][2]}: {clean(f['detail'])}"]
-            for ln in f["cli"]:
-                for phys in str(ln).splitlines() or [""]:  # comment out every physical line, never a list item
-                    block.append(phys if f["cli_safe"] else "# " + phys)
+            block = [_cli_comment(f"[{f['severity'].upper()}] {CHECKS[check][2]}: {f['detail']}")]
+            if any(_cli_unsafe(ln) for ln in f["cli"]):
+                block.append("# Commands withheld: block contains control characters or line separators.")
+                withheld_blocks.append("\n".join(block))
+                continue
+            if multi and f["cli_scope"] != "global" and not valid_vdom:
+                block.append("# Commands withheld: VDOM name cannot be safely selected.")
+                withheld_blocks.append("\n".join(block))
+                continue
+            block += [ln if f["cli_safe"] else "# " + ln for ln in f["cli"]]
             (global_blocks if f["cli_scope"] == "global" else vdom_blocks).append("\n".join(block))
+    lines += [b + "\n" for b in withheld_blocks]
     if not vdom_blocks and not global_blocks:
-        return "\n".join(lines + ["# No remediation commands generated."]) + "\n"
-    multi = dev.get("multi_vdom")
+        return guard_script("\n".join(lines + ["# No remediation commands generated."]) + "\n")
     if global_blocks:
         if multi:
             lines.append("config global")
@@ -93,7 +118,7 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
             lines.append("end\n")
     if vdom_blocks:
         if multi:
-            lines += ["config vdom", f"edit {clean(dev.get('vdom', 'root')).replace(' ', '_')}"]
+            lines += ["config vdom", f"edit {q(vdom)}"]
         lines += [b + "\n" for b in vdom_blocks]
         if multi:
             lines += ["next", "end"]
