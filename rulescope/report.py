@@ -158,7 +158,7 @@ def findings_csv(result: Dict[str, Any]) -> str:
             f["severity"], f["check"], f["title"], f["category"], EFFORT_LABEL.get(f.get("effort", ""), ""),
             f["policyid"] if f["policyid"] is not None else "", f["object"] or "", f["detail"], f["recommendation"],
             "; ".join(f.get("compliance", [])), f.get("url", ""), "", "", "")])
-    return "﻿" + buf.getvalue()  # BOM so Excel opens UTF-8 (Hebrew names) correctly
+    return "\ufeff" + buf.getvalue()  # BOM so Excel opens UTF-8 (Hebrew names) correctly
 
 
 def practices_csv(result: Dict[str, Any]) -> str:

@@ -251,7 +251,7 @@ Configs you audit may come from anyone, so rulescope treats every name, comment 
 - **The API token** is sent only after the certificate check passes (pin or CA). Use a read-only profile and trusted hosts as in section 1.
 - **Redirects are never followed**, so the API token, the NVD key and alert texts only go to the host you configured.
 
-Found a security problem? Report it privately to the maintainer rather than in a public issue.
+Found a security problem? Report it privately, not in a public issue: see [SECURITY.md](SECURITY.md).
 
 ## Limits (v0.4.2)
 
@@ -272,7 +272,12 @@ Found a security problem? Report it privately to the maintainer rather than in a
 ```bash
 python3 -m unittest discover -s tests -v
 python3 tests/bench.py 10000          # performance on a synthetic 10k-rule base
+RULESCOPE_FUZZ_ROUNDS=5000 python3 -m unittest tests.test_fuzz     # longer run of the randomized tests
 ```
+
+`tests/test_fuzz.py` feeds randomly built hostile configs through the parser and every output, and checks that no text from a config can become a script statement, a spreadsheet formula, a terminal control code, an HTML tag or a path outside the output folder. It is deterministic: a failure prints the seed and round that reproduce it.
+
+Changes per release are in [CHANGELOG.md](CHANGELOG.md); how to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Continuous integration and release preparation
 
