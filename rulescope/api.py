@@ -16,6 +16,7 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from .net import normalize_pin  # noqa: F401  (one parser for CLI, API and inventory)
 from .usage import to_epoch
 
 
@@ -28,11 +29,14 @@ class ApiError(Exception):
             404: "endpoint not available on this FortiOS version",
             405: "method not allowed on this FortiOS version",
         }.get(status, "")
+        if 300 <= status < 400:
+            hint = ("the address answers with a redirect; rulescope never follows redirects, so the API token "
+                    "is not sent to another host - check the host and admin port")
         super().__init__(f"HTTP {status} on {path}" + (f": {hint}" if hint else "") + (f" ({detail})" if detail else ""))
 
 
 # attr[old->new] or attr[old]->[new]: mask every bracketed value that belongs to a secret-looking attribute
-_SECRET_RE = re.compile(r"([\w.-]*(?:passw|passphrase|pwd|psk|secret|key|token|private|community)[\w.-]*)\[[^\]]*\](?:\s*->\s*\[[^\]]*\])?",
+_SECRET_RE = re.compile(r"([\w.-]*(?:passw|passphrase|pwd|psk|secret|key|token|private|community|credential)[\w.-]*)\[[^\]]*\](?:\s*->\s*\[[^\]]*\])?",
                         re.I)
 
 
@@ -78,16 +82,6 @@ def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
 
 class CertificatePinError(ConnectionError):
     pass
-
-
-def normalize_pin(pin: str) -> str:
-    """'AB:CD:...' or 'abcd...' -> 64 lowercase hex characters."""
-    p = re.sub(r"[\s:]", "", pin or "").lower()
-    if p.startswith("sha256/") or p.startswith("sha256:"):
-        p = p[7:]
-    if not re.fullmatch(r"[0-9a-f]{64}", p):
-        raise ValueError("--pin-sha256 must be the 64-hex-digit SHA-256 fingerprint of the FortiGate certificate")
-    return p
 
 
 def cert_fingerprint(host: str, port: int = 443, timeout: int = 10) -> str:
@@ -237,8 +231,14 @@ class FortiGateAPI:
             "router_static": ("cmdb/router/static", True, False),
             "policy_stats": ("monitor/firewall/policy", True, False),
             "webui_state": ("monitor/web-ui/state", False, False),
+            # tables rulescope does not analyze: read only to say so in the report when they hold rules
+            "security_policy": ("cmdb/firewall/security-policy", True, False),
+            "proxy_policy": ("cmdb/firewall/proxy-policy", True, False),
+            "vip6": ("cmdb/firewall/vip6", True, False),
+            "vdom_settings": ("cmdb/system/settings", True, False),
         }
-        quiet = {"admin", "api_user", "webui_state", "sdwan", "sched_onetime", "sched_group", "phase2"}
+        quiet = {"admin", "api_user", "webui_state", "sdwan", "sched_onetime", "sched_group", "phase2",
+                 "security_policy", "proxy_policy", "vip6", "vdom_settings"}
         exposure_inputs = {"vpn_ssl", "phase1", "local_in", "router_static"}
         for key, (path, scoped, meta) in optional.items():
             try:

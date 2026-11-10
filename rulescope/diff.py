@@ -18,6 +18,9 @@ TABLES: List[Tuple[str, str, Optional[List[str]], str]] = [
     ("services", "Service", None, "firewall.service.custom"),
     ("servicegrps", "Service group", None, "firewall.service.group"),
     ("vips", "VIP", None, "firewall.vip"),
+    ("vipgrps", "VIP group", None, "firewall.vipgrp"),
+    ("zones", "Zone", None, "system.zone"),
+    ("local_in", "Local-in policy", None, "firewall.local-in-policy"),
     ("interfaces", "Interface", ["allowaccess", "role"], "system.interface"),
     ("admins", "Admin", ["accprofile", "trusthosts", "two_factor"], "system.admin"),
     ("api_users", "API user", ["accprofile", "trusthosts"], "system.api-user"),
@@ -43,12 +46,30 @@ WEAKENING = [
 ]
 
 
+_RULE_OBJECTS = {"Address", "Address group", "Service", "Service group", "VIP", "VIP group"}
+
+
+def _table(snap: Dict[str, Any], key: str) -> Optional[Dict[str, Dict[str, Any]]]:
+    """A snapshot table as {name: fields}. Lists (local-in policies) and name -> members maps
+    (zones, VIP groups) are brought into that shape so they are compared like every other table."""
+    v = snap.get(key)
+    if v is None:
+        return None
+    if key == "local_in":
+        return {str(x.get("policyid")): x for x in v}
+    if key in ("vipgrps", "zones"):
+        return {n: {"member": list(m)} for n, m in v.items()}
+    return v
+
+
 def _pkey(p: Dict[str, Any]) -> str:
     return p.get("uuid") or f"id:{p['policyid']}"
 
 
 def _fields_changed(a: Dict[str, Any], b: Dict[str, Any], ignore=(), only: Optional[List[str]] = None) -> List[Tuple[str, Any, Any]]:
-    keys = only if only is not None else sorted(set(a) | set(b))
+    # Without `only`, compare the fields both sides have: a field that a newer rulescope version started
+    # to collect (or a snapshot schema upgrade added) is not a configuration change.
+    keys = only if only is not None else sorted(set(a) & set(b))
     return [(k, a.get(k), b.get(k)) for k in keys if k not in ignore and a.get(k) != b.get(k)]
 
 
@@ -120,7 +141,7 @@ def diff_snapshots(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
         res["policies"]["moved"].append(np_[k])
 
     for key, lbl, only, cfgpath in TABLES:
-        o, n = old.get(key), new.get(key)
+        o, n = _table(old, key), _table(new, key)
         if o is None or n is None:
             continue
         for name in n:
@@ -206,12 +227,62 @@ def change_alerts(old: Dict[str, Any], new: Dict[str, Any], d: Dict[str, Any]) -
         elif o["type"] == "SSL-VPN settings":
             fields = ", ".join(f for f, _, _ in o["changes"])
             alerts.append(f"SSL-VPN settings changed ({fields})")
+        elif o["type"] == "Local-in policy":
+            # local-in policies decide who can reach the firewall itself (admin GUI, SSH, VPN)
+            if o["change"] == "removed":
+                was = next((x for x in old.get("local_in") or [] if str(x.get("policyid")) == o["name"]), {})
+                if was.get("action") == "deny" and was.get("status") == "enable":
+                    alerts.append(f"Local-in deny policy #{o['name']} was removed")
+            elif o["change"] == "modified":
+                alerts.append(f"Local-in policy #{o['name']} changed ({', '.join(f for f, _, _ in o['changes'])})")
+
+    def from_wan(p: Dict[str, Any]) -> bool:
+        ifs = r.interfaces(p.get("srcintf", []))
+        return ifs is None or bool(set(ifs) & wan)
 
     def inbound(p: Dict[str, Any]) -> bool:
         if p.get("action") not in ("accept", "ipsec") or p.get("status") != "enable":
             return False
-        ifs = r.interfaces(p.get("srcintf", []))
-        return ifs is None or bool(set(ifs) & wan)
+        return from_wan(p)
+
+    def closure(names: List[str]) -> set:
+        """The names plus everything reachable through address, service and VIP groups."""
+        seen: set = set()
+        todo = list(names)
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            for tbl in ("addrgrps", "servicegrps"):
+                g = (new.get(tbl) or {}).get(n)
+                if g:
+                    todo += list(g.get("member", [])) + list(g.get("exclude-member", []))
+            todo += list((new.get("vipgrps") or {}).get(n, []))
+        return seen
+
+    # an object changes what an existing inbound rule allows without the rule itself changing
+    used: Dict[str, List[int]] = {}
+    for p in new["policies"]:
+        if inbound(p):
+            for n in closure(p.get("srcaddr", []) + p.get("dstaddr", []) + p.get("service", [])):
+                used.setdefault(n, []).append(p["policyid"])
+    for o in d["objects"]:
+        if o["type"] in _RULE_OBJECTS and o["change"] == "modified" and o["name"] in used:
+            fields = [f for f, _, _ in o["changes"] if f not in ("comment", "name")]
+            if fields:
+                pids = used[o["name"]]
+                shown = ", ".join(f"#{x}" for x in pids[:4]) + (" and more" if len(pids) > 4 else "")
+                alerts.append(f"{o['type']} {o['name']}, used by inbound rule{'s' if len(pids) > 1 else ''} {shown}, "
+                              f"changed ({', '.join(fields)})")
+
+    for p in d["policies"]["removed"]:
+        if p.get("action") == "deny" and p.get("status") == "enable" and from_wan(p):
+            alerts.append(f"Deny rule for traffic from the internet was removed: #{p['policyid']} "
+                          f"{p.get('name') or ''}".rstrip())
+    for p in d["policies"]["moved"]:
+        if p.get("status") == "enable" and from_wan(p):
+            alerts.append(f"Rule order changed for a rule from the internet: #{p['policyid']} {p.get('name') or ''}".rstrip())
 
     for p in d["policies"]["added"]:
         if inbound(p):
@@ -225,6 +296,8 @@ def change_alerts(old: Dict[str, Any], new: Dict[str, Any], d: Dict[str, Any]) -
         for f, a, b in m["changes"]:
             if f == "logtraffic" and b == "disable":
                 alerts.append(f"Logging disabled on rule #{p['policyid']}")
+            if f == "status" and b != "enable" and p.get("action") == "deny" and from_wan(p):
+                alerts.append(f"Deny rule for traffic from the internet was disabled: #{p['policyid']}")
     return alerts
 
 

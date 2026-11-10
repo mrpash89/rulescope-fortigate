@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER, q
 from .safety import clean, clean_multiline, csv_cell
 
+
 def _e(x: Any) -> str:
     return escape("" if x is None else str(x))
 

@@ -99,7 +99,10 @@ def p_trusthosts(c: Ctx) -> R:
     fs = c.f("ADMIN_NO_TRUSTHOST", "APIUSER_NO_TRUSTHOST")
     if fs:
         return "fail", _detail(fs, 3)
-    return "pass", f"{_plural(len(admins), 'admin')} and {_plural(len(api or {}), 'API user')}, all restricted by trusted hosts."
+    if api is None:
+        return "unknown", (f"{_plural(len(admins), 'admin')} restricted by trusted hosts, but API users could not be "
+                           "read, so their trusted hosts were not assessed.")
+    return "pass", f"{_plural(len(admins), 'admin')} and {_plural(len(api), 'API user')}, all restricted by trusted hosts."
 
 
 def p_local_in(c: Ctx) -> R:
@@ -190,7 +193,8 @@ def p_pde(c: Ctx) -> R:
 def p_time(c: Ctx) -> R:
     ntp, dns = c.s.get("ntp"), c.s.get("dns")
     if ntp is None:
-        return "unknown", "NTP settings were not read."
+        return "unknown", ("NTP settings were not read, or the backup does not set ntpsync explicitly "
+                           "(its default differs between FortiOS versions).")
     if c.f("NTP_DISABLED"):
         return "fail", "NTP synchronization is disabled."
     tz = c.g.get("timezone") or "default"
@@ -484,9 +488,12 @@ def p_firmware(c: Ctx) -> R:
     cnt = adv.get("counts") or {}
     vul = (f"NVD lists {_plural(cnt.get('total', 0), 'CVE')} for {lc['version']} ({cnt.get('kev', 0)} actively exploited, "
            f"{cnt.get('critical', 0)} critical)" if adv.get("checked") else "known vulnerabilities not checked (run with --advisories online)")
+    stale = adv.get("stale_days") if adv.get("checked") else None
+    if stale:
+        vul += f"; this advisory data is {stale} days old (refresh with --advisories online)"
     if bad:
         return "fail", f"FortiOS {lc['version']}: {life}; {vul}."
-    if c.f("FIRMWARE_EOES", "FIRMWARE_EOES_SOON", "FIRMWARE_CVE") or not adv.get("checked"):
+    if c.f("FIRMWARE_EOES", "FIRMWARE_EOES_SOON", "FIRMWARE_CVE") or not adv.get("checked") or stale:
         return "partial", f"FortiOS {lc['version']}: {life}; {vul}."
     return "pass", f"FortiOS {lc['version']}: {life}; {vul}."
 
@@ -582,14 +589,33 @@ PRACTICES: List[Tuple[str, str, str, str, List[str], Callable[[Ctx], R]]] = [
 ]
 
 
+# Inputs each practice needs (keys of snap["unread"]). A practice whose input could not be read is
+# never reported as met or as not applicable: it becomes "Not assessed". A failure found in the data
+# that was read still stands. NEEDS_STRICT lists inputs without which even a failure is not proven.
+NEEDS: Dict[str, Tuple[str, ...]] = {
+    "BP01": ("interface",), "BP02": ("interface",), "BP04": ("interface", "local_in"),
+    "BP27": ("vpn_ssl",), "BP28": ("vpn_ssl",), "BP29": ("vpn_ssl",), "BP30": ("vpn_ssl",),
+    "BP31": ("phase1",),
+}
+NEEDS_STRICT: Dict[str, Tuple[str, ...]] = {"BP04": ("local_in",)}
+INPUT_LABEL = {"interface": "interface settings", "local_in": "local-in policies", "vpn_ssl": "SSL-VPN settings",
+               "phase1": "IPsec phase 1 settings", "zone": "zones"}
+
+
 def evaluate(snap: Dict[str, Any], result: Dict[str, Any], wan: Set[str]) -> Dict[str, Any]:
     c = Ctx(snap, result, wan)
+    unread = set(snap.get("unread") or [])
     items = []
     for pid, domain, title, sources, related, fn in PRACTICES:
         try:
             status, evidence = fn(c)
         except (KeyError, ValueError, TypeError) as e:  # never let one practice break the report
             status, evidence = "unknown", f"Could not be evaluated ({type(e).__name__})."
+        missing = [k for k in NEEDS.get(pid, ()) if k in unread]
+        strict = [k for k in NEEDS_STRICT.get(pid, ()) if k in unread]
+        if (missing and status in ("pass", "na")) or (strict and status in ("fail", "partial")):
+            what = ", ".join(INPUT_LABEL.get(k, k) for k in (missing or strict))
+            status, evidence = "unknown", f"Not assessed: {what} could not be read."
         linked = sorted({f["check"] for f in c.f(*related)})
         items.append({"id": pid, "domain": domain, "title": title, "sources": sources, "status": status,
                       "evidence": evidence, "checks": linked})

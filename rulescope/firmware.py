@@ -23,8 +23,11 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import net
 from .catalog import finding
 from .safety import clean_tree, safe_url
+
+STALE_CACHE_DAYS = 30  # cached advisory data older than this is flagged in the report
 
 LIFECYCLE_SOURCE = "https://support.fortinet.com/Information/ProductLifeCycle.aspx"
 LIFECYCLE_CHECKED = "2026-11-05"
@@ -120,9 +123,9 @@ def normalize_cve(item: Dict[str, Any]) -> Dict[str, Any]:
     c = item.get("cve") or item
     desc = next((d.get("value", "") for d in c.get("descriptions", []) if d.get("lang") == "en"), "")
     score, sev, ver = _cvss(c.get("metrics") or {})
-    refs = [r.get("url", "") for r in c.get("references", []) if isinstance(r, dict)]
+    refs = [str(r.get("url", "")) for r in c.get("references", []) if isinstance(r, dict)]
     fgir = next((m.group(0).upper() for u in refs for m in [_FGIR.search(u)] if m), None)
-    advisory = next((u for u in refs if _FGIR.search(u)), None)
+    advisory = next((u for u in refs if _FGIR.search(u) and net.https_only(u)), None)  # becomes a link in the report
     title = c.get("cisaVulnerabilityName") or (desc.split(". ")[0] if desc else c.get("id", ""))
     return sanitize_cve({"id": c.get("id", ""), "published": (c.get("published") or "")[:10], "cvss": score,
                          "severity": sev, "cvss_version": ver, "kev": bool(c.get("cisaExploitAdd")),
@@ -158,6 +161,7 @@ class AdvisoryClient:
         self._mem: Dict[str, Dict[str, Any]] = {}
         self._guard = threading.Lock()
         self._locks: Dict[str, threading.Lock] = {}
+        self._opener = net.build_opener()  # never follows redirects: the API key stays with the NVD host
 
     def _version_lock(self, version: str) -> threading.Lock:
         with self._guard:
@@ -205,7 +209,7 @@ class AdvisoryClient:
         req.add_header("User-Agent", "rulescope")
         if self.api_key:
             req.add_header("apiKey", self.api_key)
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+        with self._opener.open(req, timeout=self.timeout) as r:
             return json.loads(r.read())
 
     def _fetch(self, version: str) -> List[Dict[str, Any]]:
@@ -258,6 +262,13 @@ class AdvisoryClient:
             res["from_cache"] = cached is not None
         if cached:
             res.update({"cves": cached.get("cves", []), "fetched": cached.get("fetched")})
+            try:
+                used_age = time.time() - _dt.datetime.fromisoformat(str(cached.get("fetched"))).timestamp()
+            except ValueError:
+                used_age = None
+            if used_age is None or used_age > STALE_CACHE_DAYS * 86400:
+                # old data still lists what was known then, but it must not read as "checked today"
+                res["stale_days"] = int(used_age // 86400) if used_age is not None else STALE_CACHE_DAYS
             if res["error"]:
                 res["error"] += f"; using cached results from {str(cached.get('fetched'))[:10]}"
                 res["from_cache"] = True
@@ -282,7 +293,8 @@ def summarize(snap: Dict[str, Any], adv: Optional[Dict[str, Any]], table: Option
             "lifecycle": lc, "branches": lifecycle_table(today, table),
             "advisories": {"mode": (adv or {}).get("mode", "off"), "checked": checked, "source": NVD_SOURCE,
                            "fetched": (adv or {}).get("fetched"), "error": (adv or {}).get("error"),
-                           "from_cache": (adv or {}).get("from_cache", False), "counts": counts, "cves": cves}}
+                           "from_cache": (adv or {}).get("from_cache", False),
+                           "stale_days": (adv or {}).get("stale_days"), "counts": counts, "cves": cves}}
 
 
 def check_firmware(fw: Dict[str, Any]) -> List[Dict[str, Any]]:

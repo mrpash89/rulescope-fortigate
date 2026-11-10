@@ -49,6 +49,10 @@ _ISDB_SRC = ["internet-service-src-name", "internet-service-src-group", "interne
 
 
 def _build_match(p: Dict[str, Any], r: Resolver) -> Match:
+    # A negated internet service matches every source or destination except the listed ones: like other
+    # negated fields, such a rule never covers and is never covered.
+    isdb_negated = any(p.get(k) == "enable" for k in ("internet-service-negate", "internet-service-src-negate"))
+
     def isdb(enabled: str, fields: List[str]) -> Optional[Set[str]]:
         if enabled != "enable":
             return None
@@ -61,7 +65,7 @@ def _build_match(p: Dict[str, Any], r: Resolver) -> Match:
         ident=set(p.get("users", [])) | set(p.get("groups", [])) | set(p.get("fsso-groups", [])),
         isdb_src=isdb(p.get("internet-service-src", "disable"), _ISDB_SRC),
         isdb_dst=isdb(p.get("internet-service", "disable"), _ISDB_DST),
-        src6=set(p.get("srcaddr6", [])), dst6=set(p.get("dstaddr6", [])), skip=skip,
+        src6=set(p.get("srcaddr6", [])), dst6=set(p.get("dstaddr6", [])), skip=skip or isdb_negated,
     )
 
 
@@ -299,6 +303,16 @@ def check_usage(snap: Dict[str, Any], stale_days: int, today: str) -> List[Dict[
         return []
     out = []
     now = iso_epoch(snap["collected_at"])
+    # Counters reset at every reboot. A rule with zero hits is only disabled by a live command when the
+    # counters are known to cover at least the stale period; otherwise the command stays commented out.
+    since = snap.get("counter_since")
+    long_window = bool(since) and now - int(since) >= stale_days * 86400
+    if long_window:
+        window = ""
+    elif since:
+        window = f" Counters cover only {max(0, int((now - int(since)) // 86400))} days, so confirm before disabling."
+    else:
+        window = " The counter period is unknown, so confirm before disabling."
     for p in snap["policies"]:
         if p["status"] != "enable":
             continue
@@ -307,8 +321,8 @@ def check_usage(snap: Dict[str, Any], stale_days: int, today: str) -> List[Dict[
             continue
         if h["hit_count"] == 0:
             if p["action"] in PERMIT:
-                out.append(finding("UNUSED", policyid=p["policyid"], detail=f"{label(p)}: 0 hits.",
-                    cli=disable_cli(p, "zero hits", today)))
+                out.append(finding("UNUSED", policyid=p["policyid"], detail=f"{label(p)}: 0 hits.{window}",
+                    cli=disable_cli(p, "zero hits", today), cli_safe=long_window))
             else:
                 out.append(finding("UNUSED_DENY", policyid=p["policyid"], detail=f"{label(p)}: 0 hits."))
         elif h["last_used"] and now - h["last_used"] > stale_days * 86400:
@@ -367,12 +381,13 @@ def check_admin(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
         clean = [x for x in aa if x not in ("telnet", "http")]  # one fix per interface for both findings
         fix = ["config system interface", f"    edit {q(name)}", f"        set allowaccess {' '.join(clean) or 'ping'}",
                "    next", "end"]
+        # commented out: the command changes how the firewall can be managed
         if "telnet" in aa:
             out.append(finding("ADMIN_TELNET", obj=name, detail=f"Interface {name} allows: {' '.join(aa)}.",
-                               cli=fix, cli_scope="global"))
+                               cli=fix, cli_scope="global", cli_safe=False))
         if "http" in aa:
             out.append(finding("ADMIN_HTTP", obj=name, detail=f"Interface {name} allows: {' '.join(aa)}.",
-                               cli=fix, cli_scope="global"))
+                               cli=fix, cli_scope="global", cli_safe=False))
     for a in admins.values():
         if not a["trusthosts"]:
             out.append(finding("ADMIN_NO_TRUSTHOST", obj=a["name"],

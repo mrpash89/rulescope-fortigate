@@ -7,10 +7,11 @@ specific addresses) and what the service is.
 """
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .catalog import finding, label, q, step_down
-from .resolve import Resolver, SvcSet
+from .resolve import Resolver, SvcSet, _merge
 
 PERMIT = ("accept", "ipsec")
 
@@ -150,6 +151,34 @@ def _address_leaves(snap: Dict[str, Any], names: List[str], depth: int = 0) -> L
     return out
 
 
+_PRIVATE = [(0x0A000000, 0x0AFFFFFF), (0xAC100000, 0xAC1FFFFF), (0xC0A80000, 0xC0A8FFFF)]  # RFC 1918
+BROAD_SOURCE = 2 ** 24  # this many public addresses (a /8) or more count as "anyone on the internet"
+
+
+def public_size(ivs: List[Tuple[int, int]]) -> int:
+    """Number of public (non RFC 1918) IPv4 addresses in merged intervals."""
+    n = 0
+    for lo, hi in ivs:
+        n += hi - lo + 1
+        for plo, phi in _PRIVATE:
+            a, b = max(lo, plo), min(hi, phi)
+            if a <= b:
+                n -= b - a + 1
+    return n
+
+
+def _upper_bound(snap: Dict[str, Any], r: Resolver, names: List[str], depth: int = 0) -> List[Tuple[int, int]]:
+    """IPv4 intervals the names can match at most: a group with exclusions counts with all its members."""
+    ivs: List[Tuple[int, int]] = []
+    for n in names:
+        g = snap["addrgrps"].get(n)
+        if g is not None and n not in snap["addresses"] and depth < 20:
+            ivs += _upper_bound(snap, r, g.get("member", []), depth + 1)
+        else:
+            ivs += r.address(n).iv
+    return ivs
+
+
 def source_scope(snap: Dict[str, Any], r: Resolver, names: List[str], negate: bool = False,
                  isdb: Optional[List[str]] = None) -> Tuple[str, str]:
     """('any'|'geo'|'isdb'|'restricted', human text)."""
@@ -159,6 +188,10 @@ def source_scope(snap: Dict[str, Any], r: Resolver, names: List[str], negate: bo
         return "any", "Any except " + ", ".join(names)
     if not names or r.addresses(names).is_full:
         return "any", "Any (internet)"
+    # A source list that is not literally "all" can still be most of the internet: a wide range, or a
+    # group built as "everything except a few networks". Both are reported like an unrestricted source.
+    if public_size(_merge(_upper_bound(snap, r, names))) >= BROAD_SOURCE:
+        return "any", "Broad range: " + ", ".join(names[:4]) + (f" +{len(names) - 4}" if len(names) > 4 else "")
     countries = sorted({a["country"] for a in _address_leaves(snap, names) if a["type"] == "geography" and a["country"]})
     if countries:
         return "geo", "Countries: " + ", ".join(countries)
@@ -250,12 +283,21 @@ def analyze(snap: Dict[str, Any], r: Resolver, wan: Set[str], today: str) -> Tup
         if not (src_if is None or set(src_if) & wan):
             continue
         vips = _vip_targets(snap, p["dstaddr"])
-        if not vips and (src_if is None or (dst_if is not None and dst_if and set(dst_if) <= wan)):
-            continue  # any->x without VIPs, or WAN->WAN transit: not an inbound publication
+        if not vips:
+            if dst_if is not None and dst_if and set(dst_if) <= wan:
+                continue  # WAN->WAN transit: not an inbound publication
+            if src_if is None:
+                # any->x without VIPs is an inbound publication only when it names public addresses
+                dst = r.addresses(p["dstaddr"])
+                if dst.is_full or public_size(dst.iv) == 0:
+                    continue
         isdb_src = [v for f in ("internet-service-src-name", "internet-service-src-group",
                                 "internet-service-src-custom", "internet-service-src-custom-group")
                     for v in p.get(f, [])] if p.get("internet-service-src") == "enable" else None
         kind, src_text = source_scope(snap, r, p["srcaddr"], p.get("srcaddr-negate") == "enable", isdb_src)
+        if isdb_src is not None and p.get("internet-service-src-negate") == "enable":
+            # "every source except these internet services" is an unrestricted source, not an ISDB allow list
+            kind, src_text = "any", "Any except internet services: " + (", ".join(isdb_src) or "listed IDs")
         svc = r.services(p["service"])
         svc_text = ", ".join(p["service"]) or ("ISDB" if p.get("internet-service") == "enable" else "-")
         prot, risky, all_ports = protection(p), [], False
@@ -320,17 +362,31 @@ def analyze(snap: Dict[str, Any], r: Resolver, wan: Set[str], today: str) -> Tup
 
 
 def _local_in_block(snap: Dict[str, Any], r: Resolver, iface: str, proto: str, port: Tuple[int, int]) -> Optional[int]:
-    """Policy id of an enabled local-in deny that drops this port from all sources on this interface."""
+    """Policy id of an enabled local-in deny that drops this port from all sources on this interface.
+
+    Only a deny that provably applies counts: always active, no negated field, every source, and a
+    destination that is "all" or contains the interface's own address."""
+    try:
+        own_ip = int(ipaddress.IPv4Address(str(snap["interfaces"][iface]["ip"]).split()[0].split("/")[0]))
+    except (KeyError, IndexError, ValueError):
+        own_ip = 0  # unknown or dynamic address: only a deny for every destination counts
     for li in snap.get("local_in", []):
-        if li["status"] != "enable" or li["action"] != "deny" or li.get("srcaddr-negate") == "enable":
+        if li["status"] != "enable" or li["action"] != "deny":
+            continue
+        if any(li.get(k) == "enable" for k in ("srcaddr-negate", "dstaddr-negate", "service-negate")):
+            continue
+        if li.get("schedule") not in (None, "", "always"):
             continue
         ifs = r.interfaces(li["intf"]) if li["intf"] else None
         if ifs is not None and iface not in ifs:
             continue
         if not r.addresses(li["srcaddr"] or ["all"]).is_full:
             continue
+        dst = r.addresses(li.get("dstaddr") or ["all"])
+        if not dst.is_full and not (own_ip and any(lo <= own_ip <= hi for lo, hi in dst.iv)):
+            continue
         svc = r.services(li["service"] or ["ALL"])
-        if svc.allows_port(proto, *port):
+        if svc.allows_port(proto, *port, loose=False):
             return li["policyid"]
     return None
 

@@ -158,7 +158,20 @@ class Resolver:
             proto = s["protocol"].upper()
             restricted = (s.get("iprange") not in ("", "0.0.0.0", "0.0.0.0-0.0.0.0")) or bool(s.get("fqdn"))
             if restricted:
+                # Opaque for coverage (it only applies to some addresses), but the ports it opens are
+                # kept so the exposure checks still see a risky service published through it.
                 r.tokens.add(f"svc:{name}")
+                if proto == "IP":
+                    try:
+                        r.loose_ip.add(int(s.get("protocol-number") or 0))
+                    except ValueError:
+                        pass
+                elif "TCP" in proto or "UDP" in proto or "SCTP" in proto:
+                    for p, fld in _PORT_FIELDS:
+                        for rng in s.get(fld, []):
+                            parsed = _parse_portrange(rng)
+                            if parsed:
+                                r.loose.setdefault(p, []).append((parsed[0], parsed[1]))
             elif proto == "IP":
                 try:
                     r.ip.add(int(s.get("protocol-number") or 0))
@@ -166,7 +179,13 @@ class Resolver:
                     r.tokens.add(f"svc:{name}")
             elif proto == "ICMP":
                 t = s.get("icmptype")
-                r.icmp.add(int(t) if t not in (None, "") else None)
+                if s.get("icmpcode") not in (None, ""):
+                    r.tokens.add(f"svc:{name}")  # limited to one ICMP code: only an identical service covers it
+                else:
+                    try:
+                        r.icmp.add(int(t) if t not in (None, "") else None)
+                    except ValueError:
+                        r.tokens.add(f"svc:{name}")
             elif "TCP" in proto or "UDP" in proto or "SCTP" in proto:
                 for p, fld in _PORT_FIELDS:
                     for rng in s.get(fld, []):
@@ -227,21 +246,34 @@ class SvcSet:
     icmp: Set[Optional[int]] = field(default_factory=set)            # None = any ICMP type
     ports: Dict[str, List[Tuple[int, int, int, int]]] = field(default_factory=dict)
     tokens: Set[str] = field(default_factory=set)
+    # ports and protocols of opaque services (limited to an address range or FQDN): used only by
+    # allows_port, never by covers
+    loose: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
+    loose_ip: Set[int] = field(default_factory=set)
 
     def merge(self, o: "SvcSet") -> None:
         self.ip |= o.ip
         self.icmp |= o.icmp
         self.tokens |= o.tokens
+        self.loose_ip |= o.loose_ip
         for p, rs in o.ports.items():
             self.ports.setdefault(p, []).extend(rs)
+        for p, lr in o.loose.items():
+            self.loose.setdefault(p, []).extend(lr)
 
     @property
     def is_all(self) -> bool:
         return 0 in self.ip
 
-    def allows_port(self, proto: str, lo: int, hi: int) -> bool:
-        """True if any destination port in [lo, hi] of this protocol is permitted (source ports ignored)."""
+    def allows_port(self, proto: str, lo: int, hi: int, loose: bool = True) -> bool:
+        """True if any destination port in [lo, hi] of this protocol is permitted (source ports ignored).
+        `loose` also counts services that only apply to some addresses; pass False when the answer must
+        hold for every address (a deny rule that is relied on as a block)."""
         if self.is_all or PROTO_NUM.get(proto) in self.ip:
+            return True
+        if loose and (0 in self.loose_ip or PROTO_NUM.get(proto) in self.loose_ip):
+            return True
+        if loose and any(dlo <= hi and lo <= dhi for dlo, dhi in self.loose.get(proto, [])):
             return True
         return any(dlo <= hi and lo <= dhi for dlo, dhi, _, _ in self.ports.get(proto, []))
 

@@ -3,17 +3,18 @@
 # Firmware advisories, palette and lifecycle dates are command-line options of 'rulescope fleet':
 #   rulescope fleet --inventory fleet.ini --out site --advisories online --palette harbor
 
+# TLS: a FortiGate usually has a self-signed admin certificate. Pin it per device with pin_sha256
+# (the SHA-256 fingerprint of that certificate), or set ca_file once the certificate comes from your CA.
+#   rulescope cert --host 192.0.2.1      (run it once, over a network path you trust)
+# 'insecure = yes' switches verification off: anyone on the path can then read the API token.
+
 [DEFAULT]
 token_file = /etc/rulescope/token
 timeout = 30
-; Certificate check, one of:
-;   pin_sha256 = <fingerprint>   per device, for the self-signed FortiGate certificate (rulescope cert --host ...)
-;   ca_file = /etc/rulescope/ca.pem   when the FortiGates have certificates from your CA
-;   insecure = yes   lab only: anyone on the network path can capture the token
 
 [HQ-FW]
 host = 192.0.2.1
-pin_sha256 = PASTE_FINGERPRINT_FROM_rulescope_cert
+pin_sha256 = 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF ; replace with the real fingerprint
 label = Headquarters
 group = Core
 vdom = root
@@ -21,7 +22,7 @@ not_wan = port10, QinQ-V10 ; default route points to an upstream internal networ
 
 [Branch-North]
 host = 192.0.2.21:8443  ; admin HTTPS on a non-default port
-pin_sha256 = PASTE_FINGERPRINT_FROM_rulescope_cert
+ca_file = /etc/rulescope/internal-ca.pem ; certificate issued by your own CA
 label = Branch North
 group = Branches
 token_env = BRANCH_TOKEN ; token from an environment variable instead of the default file

@@ -468,9 +468,9 @@ class InventoryTests(unittest.TestCase):
         devs = fleet.load_inventory(os.path.join(os.path.dirname(HERE), "examples", "fleet.ini.example"))
         by = {d["name"]: d for d in devs}
         self.assertEqual(set(by), {"HQ-FW", "Branch-North", "Customer-X-offline"})
-        self.assertFalse(by["HQ-FW"]["insecure"])                      # certificate checks stay on by default
-        self.assertEqual(by["HQ-FW"]["pin_sha256"], "PASTE_FINGERPRINT_FROM_rulescope_cert")
-        self.assertEqual(by["Branch-North"]["host"], "192.0.2.21:8443")              # inline '; comment' stripped
+        self.assertFalse(by["HQ-FW"]["insecure"])                      # the example pins the certificate instead
+        self.assertTrue(by["HQ-FW"]["pin_sha256"].endswith("EE:FF"))   # inline '; comment' stripped
+        self.assertEqual(by["Branch-North"]["host"], "192.0.2.21:8443")
         self.assertEqual(by["Branch-North"]["token_env"], "BRANCH_TOKEN")
         self.assertEqual(by["Customer-X-offline"]["usage_since"], "2026-08-01")
         self.assertEqual(by["HQ-FW"]["not_wan"], "port10, QinQ-V10")
@@ -1338,6 +1338,218 @@ class ReviewFixTests(unittest.TestCase):
             self.assertNotIn("\n", msg)
             self.assertNotIn("\r", msg)
             self.assertIn("alert=\"rule 'a'  fake line\"", msg)
+
+
+class SecurityReviewTests(unittest.TestCase):
+    """Regression tests: untrusted input, transport, false verdicts, change alerts."""
+
+    def _status(self, snap):
+        return {i["id"]: i["status"] for i in checks.analyze(snap)["practices"]["items"]}
+
+    # ---- untrusted config backups
+
+    def test_csv_cells_are_not_formulas(self):
+        import csv
+        snap = model.from_config(load_sample())
+        evil = '=HYPERLINK("http://example.invalid","x")'
+        snap["addresses"][evil] = model._address(evil, {"subnet": "10.9.9.8 255.255.255.255"})
+        snap["references"][evil] = 0
+        res = checks.analyze(snap)
+        self.assertIn(evil, by_check(res)["UNUSED_OBJECT"])
+        for txt in (report.findings_csv(res), report.practices_csv(res)):
+            for row in csv.reader(io.StringIO(txt.lstrip("﻿"))):
+                for cell in row:
+                    self.assertFalse(cell.startswith(("=", "+", "-", "@")), cell)
+
+    def test_folder_names_and_links(self):
+        from rulescope import net
+        self.assertEqual(source.safe_name(".."), "fortigate")
+        self.assertEqual(source.safe_name("../x"), "_x")
+        self.assertEqual(source.safe_name("FGT-LAB.site1"), "FGT-LAB.site1")
+        self.assertEqual(net.https_only("javascript:alert(1)"), "")
+        self.assertEqual(net.https_only("https://fortiguard.com/psirt/FG-IR-24-001"), "https://fortiguard.com/psirt/FG-IR-24-001")
+        cve = firmware.normalize_cve({"id": "CVE-2099-0001", "references": [{"url": "javascript:alert('FG-IR-99-001')"}]})
+        self.assertTrue(cve["url"].startswith("https://nvd.nist.gov/"))
+
+    def test_same_hostname_on_two_devices_keeps_separate_histories(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            a = source.save_snapshot({"device": {"hostname": "fw", "serial": "AAA"}}, tmp)
+            b = source.save_snapshot({"device": {"hostname": "fw", "serial": "BBB"}}, tmp)
+            a2 = source.save_snapshot({"device": {"hostname": "fw", "serial": "AAA"}}, tmp)
+            self.assertEqual(os.path.dirname(a), os.path.dirname(a2))
+            self.assertNotEqual(os.path.dirname(a), os.path.dirname(b))
+            p = os.path.join(tmp, "f.ini")
+            with open(p, "w") as fh:
+                fh.write("[HQ FW]\nhost = 192.0.2.1\n\n[HQ_FW]\nhost = 192.0.2.2\n")
+            with self.assertRaises(ValueError):
+                fleet.load_inventory(p)
+        finally:
+            shutil.rmtree(tmp)
+
+    # ---- transport
+
+    def test_pin_format(self):
+        from rulescope import net
+        self.assertEqual(net.normalize_pin("SHA256 Fingerprint=" + ":".join(["AB"] * 32)), "ab" * 32)
+        self.assertEqual(net.normalize_pin("cd" * 32), "cd" * 32)
+        with self.assertRaises(ValueError):
+            net.normalize_pin("abc")
+
+    def test_redirects_are_not_followed(self):
+        from rulescope.api import ApiError, FortiGateAPI
+        hits = []
+
+        class Redirecting(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append((self.path, self.headers.get("Authorization")))
+                if self.path.startswith("/api/"):
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/elsewhere")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), Redirecting)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            api = FortiGateAPI("127.0.0.1", "secret-token", port=srv.server_address[1])
+            api.base = f"http://127.0.0.1:{srv.server_address[1]}"
+            with self.assertRaises(ApiError) as cm:
+                api.get("monitor/system/status")
+            self.assertEqual(cm.exception.status, 302)
+            self.assertEqual([p for p, _ in hits if p.startswith("/elsewhere")], [])   # the token went nowhere else
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_undelivered_alerts_are_kept_and_sent_later(self):
+        from rulescope import notify
+        tmp = tempfile.mkdtemp()
+        try:
+            pending = os.path.join(tmp, "pending")
+            sent = []
+
+            def down(todo):
+                raise OSError("webhook down")
+
+            self.assertIn("webhook down", notify.deliver(pending, down, ["first"]))
+            self.assertTrue(os.path.exists(pending))
+            self.assertIsNone(notify.deliver(pending, sent.extend, ["second"]))
+            self.assertEqual(sent, ["first", "second"])
+            self.assertFalse(os.path.exists(pending))
+            self.assertIsNone(notify.deliver(pending, down, []))            # nothing to send: nothing fails
+            with self.assertRaises(ValueError):
+                notify.webhook("file:///etc/passwd", "fw", ["a"], 1)
+        finally:
+            shutil.rmtree(tmp)
+
+    # ---- rule analysis
+
+    def test_negated_internet_service_never_covers(self):
+        r = Resolver(model.from_config(load_sample()))
+        base = {"srcintf": ["wan1"], "dstintf": ["internal"], "action": "accept", "schedule": "always",
+                "internet-service-src": "enable", "internet-service-src-name": ["Malicious-Malicious.Server"],
+                "dstaddr": ["all"], "service": ["ALL"]}
+        plain = checks._build_match(model._policy(2, base), r)
+        negated = checks._build_match(model._policy(1, dict(base, **{"internet-service-src-negate": "enable"})), r)
+        self.assertTrue(checks.covers(checks._build_match(model._policy(3, base), r), plain))
+        self.assertFalse(checks.covers(negated, plain))                 # "everyone except" does not cover "only these"
+        self.assertFalse(checks.covers(plain, negated))
+
+    def test_zero_hit_rule_is_disabled_live_only_with_a_long_counter_window(self):
+        snap = model.from_config(load_sample())
+        now = model.iso_epoch(snap["collected_at"])
+        snap["hits"] = {"20": {"hit_count": 0, "bytes": 0, "last_used": 0, "first_used": 0}}
+        for since, safe in ((now - 2 * 86400, False), (None, False), (now - 200 * 86400, True)):
+            snap["counter_since"] = since
+            unused = [f for f in checks.analyze(snap)["findings"] if f["check"] == "UNUSED"]
+            self.assertEqual([f["policyid"] for f in unused], [20])
+            self.assertEqual(unused[0]["cli_safe"], safe, since)
+
+    def test_route_to_named_address_is_not_a_default_route(self):
+        self.assertIsNone(model._default_route({"dstaddr": ["Branch_Nets"], "device": ["mpls"]}))
+        self.assertIsNone(model._default_route({"internet-service": 327681, "device": "port5"}))
+        self.assertIsNotNone(model._default_route({"device": ["wan1"]}))
+        self.assertIsNotNone(model._default_route({"dst": "0.0.0.0 0.0.0.0", "dstaddr": "", "internet-service": 0}))
+
+    def test_broad_source_counts_as_anyone(self):
+        from rulescope import exposure
+        snap = model.from_config(load_sample())
+        snap["addresses"]["Wide"] = model._address("Wide", {"type": "iprange", "start-ip": "1.0.0.0",
+                                                            "end-ip": "223.255.255.255"})
+        snap["addresses"]["Office"] = model._address("Office", {"subnet": "198.51.100.0 255.255.255.0"})
+        snap["addresses"]["Rfc1918"] = model._address("Rfc1918", {"subnet": "10.0.0.0 255.0.0.0"})
+        snap["addrgrps"]["AllButLan"] = model._group("AllButLan", {"member": ["all"], "exclude": "enable",
+                                                                   "exclude-member": ["Rfc1918"]})
+        r = Resolver(snap)
+        self.assertEqual(exposure.source_scope(snap, r, ["Wide"])[0], "any")
+        self.assertEqual(exposure.source_scope(snap, r, ["AllButLan"])[0], "any")
+        self.assertEqual(exposure.source_scope(snap, r, ["Office"])[0], "restricted")
+        self.assertEqual(exposure.source_scope(snap, r, ["Rfc1918"])[0], "restricted")
+
+    def test_address_limited_service_still_counts_for_exposure(self):
+        snap = model.from_config(load_sample())
+        snap["services"]["RDP_some"] = model._service("RDP_some", {"tcp-portrange": "3389",
+                                                                   "iprange": "10.0.0.1-10.0.0.9"})
+        svc = Resolver(snap).services(["RDP_some"])
+        self.assertTrue(svc.allows_port("tcp", 3389, 3389))
+        self.assertFalse(svc.allows_port("tcp", 3389, 3389, loose=False))
+
+    def test_local_in_deny_for_another_destination_is_no_protection(self):
+        snap = model.from_config(load_sample())
+        self.assertEqual(sev_of(checks.analyze(snap), "ADMIN_WAN", "wan2"), "low")
+        snap["addresses"]["Other"] = model._address("Other", {"subnet": "192.0.2.250 255.255.255.255"})
+        snap["local_in"][0]["dstaddr"] = ["Other"]
+        self.assertNotEqual(sev_of(checks.analyze(snap), "ADMIN_WAN", "wan2"), "low")
+        snap["local_in"][0].update(dstaddr=["all"], schedule="office-hours")
+        self.assertNotEqual(sev_of(checks.analyze(snap), "ADMIN_WAN", "wan2"), "low")
+
+    # ---- "not assessed" instead of a pass
+
+    def test_unread_inputs_are_not_assessed(self):
+        snap = model.from_config(load_sample())
+        snap["sslvpn"], snap["interfaces"], snap["api_users"] = None, {}, None
+        snap["unread"] = ["interface", "vpn_ssl"]
+        st = self._status(snap)
+        for bp in ("BP02", "BP27", "BP28", "BP30"):
+            self.assertEqual(st[bp], "unknown", bp)
+        self.assertNotEqual(st["BP03"], "pass")
+
+    def test_partial_backup_and_other_rule_tables(self):
+        text = ('config firewall policy\n    edit 1\n        set srcintf "port1"\n        set dstintf "port2"\n'
+                '        set action accept\n        set srcaddr "all"\n        set dstaddr "all"\n'
+                '        set schedule "always"\n        set service "ALL"\n    next\nend\n')
+        snap = model.from_config(text)
+        self.assertIsNone(snap["admins"])
+        self.assertIn("interface", snap["unread"])
+        res = checks.analyze(snap)
+        st = {i["id"]: i["status"] for i in res["practices"]["items"]}
+        self.assertEqual((st["BP02"], st["BP03"], st["BP07"]), ("unknown", "unknown", "unknown"))
+        self.assertTrue(any("partial or VDOM-only backup" in n for n in res["notes"]))
+        more = load_sample() + 'config firewall security-policy\n    edit 1\n        set name "x"\n    next\nend\n'
+        self.assertTrue(any("Not analyzed" in n for n in model.from_config(more)["notes"]))
+        self.assertFalse(any("Not analyzed" in n for n in model.from_config(load_sample())["notes"]))
+
+    # ---- change tracking and redaction
+
+    def test_alerts_for_local_in_and_objects_behind_inbound_rules(self):
+        old = model.from_config(load_sample())
+        new = copy.deepcopy(old)
+        new["collected_at"] = "2099-01-01T00:00:00+00:00"
+        new["local_in"] = []
+        new["vips"]["VIP_RDP"]["mappedport"] = "22"
+        d = diff.diff_snapshots(old, new)
+        alerts = " | ".join(d["alerts"])
+        self.assertIn("Local-in deny policy #1 was removed", alerts)
+        self.assertIn("VIP VIP_RDP, used by inbound rule", alerts)
+        self.assertIn(("Local-in policy", "1", "removed"), {(o["type"], o["name"], o["change"]) for o in d["objects"]})
+        self.assertTrue(diff.diff_snapshots(old, copy.deepcopy(old))["empty"])
 
 
 if __name__ == "__main__":

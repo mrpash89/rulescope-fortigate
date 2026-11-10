@@ -106,21 +106,26 @@ def _write(path: str, text: str) -> None:
     print(f"wrote {path}")
 
 
+def _webhook(args: argparse.Namespace) -> Optional[str]:
+    """Webhook URLs are secrets: prefer a file or RULESCOPE_WEBHOOK over the command line (visible in ps)."""
+    if getattr(args, "webhook", None) and not getattr(args, "webhook_file", None):
+        print("warning: --webhook shows the URL in the process list; prefer --webhook-file or RULESCOPE_WEBHOOK.",
+              file=sys.stderr)
+    try:
+        return notify.webhook_url(getattr(args, "webhook", None), getattr(args, "webhook_file", None))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"webhook: {e}")
+
+
+def _add_notify(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--webhook", help="POST risky-change alerts to this URL (prefer --webhook-file: the URL is a secret)")
+    p.add_argument("--webhook-file", help="File containing the webhook URL (or set RULESCOPE_WEBHOOK)")
+    p.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
+
+
 def _load_json(path: str) -> Dict[str, Any]:
     with open(path, encoding="utf-8") as fh:
         return clean_tree(json.load(fh))
-
-
-def _webhook(args: argparse.Namespace) -> Optional[str]:
-    """Webhook URLs are secrets: prefer a file or RULESCOPE_WEBHOOK over the command line (visible in ps)."""
-    if getattr(args, "webhook_file", None):
-        with open(args.webhook_file, encoding="utf-8") as fh:
-            return fh.read().strip() or None
-    if getattr(args, "webhook", None):
-        print("warning: --webhook shows the URL in the process list; prefer --webhook-file or RULESCOPE_WEBHOOK.",
-              file=sys.stderr)
-        return args.webhook
-    return os.environ.get("RULESCOPE_WEBHOOK") or None
 
 
 def _outputs(snap: Dict[str, Any], args: argparse.Namespace) -> int:
@@ -229,9 +234,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_wan(c)
     c.add_argument("--out", default="snapshots", help="Snapshot directory (default: ./snapshots)")
     c.add_argument("--diff", action="store_true", help="Print changes since the previous snapshot")
-    c.add_argument("--webhook", help="POST risky-change alerts to this URL (visible in ps: prefer --webhook-file)")
-    c.add_argument("--webhook-file", help="File containing the webhook URL (or set RULESCOPE_WEBHOOK)")
-    c.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
+    _add_notify(c)
 
     n = sub.add_parser("analyze", help="Analyze a saved snapshot")
     n.add_argument("snapshot")
@@ -256,9 +259,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     f.add_argument("--stale-days", type=int, default=90)
     f.add_argument("--baseline-days", type=int, default=30, help="Compare each report with a snapshot this old")
     f.add_argument("--auditor", default="")
-    f.add_argument("--webhook", help="POST risky-change alerts to this URL (visible in ps: prefer --webhook-file)")
-    f.add_argument("--webhook-file", help="File containing the webhook URL (or set RULESCOPE_WEBHOOK)")
-    f.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
+    _add_notify(f)
     f.add_argument("--palette", choices=list(PALETTES), default="harbor", help="Default color palette of the pages")
     _add_firmware(f)
 
@@ -282,29 +283,48 @@ def main(argv: Optional[List[str]] = None) -> int:
         snap = _snapshot_from_args(args)
         apply_wan(snap, args.wan, args.not_wan)
         if args.save_snapshot:
-            print(f"snapshot {source.save_snapshot(snap, args.save_snapshot)}")
+            saved = source.save_snapshot(snap, args.save_snapshot)
+            print(f"snapshot {saved}")
+            source.prune(os.path.dirname(saved))
         return _outputs(snap, args)
 
     if args.cmd == "collect":
+        hook = _webhook(args)
         snap = _snapshot_from_args(args)
         apply_wan(snap, args.wan, args.not_wan)
         path = source.save_snapshot(snap, args.out)
         print(f"snapshot {path}")
-        files = source.list_snapshots(os.path.dirname(path))
-        hook = _webhook(args)
+        sdir = os.path.dirname(path)
+        files = source.list_snapshots(sdir)
+        rc = 0
         if args.diff or hook or args.syslog:
+            alerts: List[str] = []
+            changes = 0
             if len(files) < 2:
                 print("no previous snapshot to compare")
-                return 0
-            res = diff.diff_snapshots(source.load_snapshot(files[-2]), snap)
-            if args.diff:
-                print(diff.render_text(res))
-            dev = snap["device"].get("hostname") or "fortigate"
-            if res["alerts"] and hook:
-                notify.webhook(hook, dev, res["alerts"], len(res["objects"]) + sum(map(len, res["policies"].values())))
-            if res["alerts"] and args.syslog:
-                notify.syslog(args.syslog, dev, res["alerts"])
-        return 0
+            else:
+                res = diff.diff_snapshots(source.load_snapshot(files[-2]), snap)
+                if args.diff:
+                    print(diff.render_text(res))
+                alerts = res["alerts"]
+                changes = len(res["objects"]) + sum(map(len, res["policies"].values()))
+            if hook or args.syslog:
+                dev = snap["device"].get("hostname") or "fortigate"
+
+                def send(todo: List[str]) -> None:
+                    if hook:
+                        notify.webhook(hook, dev, todo, changes)
+                    if args.syslog:
+                        notify.syslog(args.syslog, dev, todo)
+
+                # not a .json name: every *.json in this folder is a snapshot
+                err = notify.deliver(os.path.join(sdir, "pending-alerts.list"), send, alerts)
+                if err:
+                    print(f"warning: alerts not delivered ({err}); they are kept and sent with the next run",
+                          file=sys.stderr)
+                    rc = 4
+        source.prune(sdir)  # hourly snapshots would otherwise grow without limit
+        return rc
 
     if args.cmd == "analyze":
         try:
@@ -348,8 +368,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"changes={r.get('changes', 0)} alerts={len(r.get('alerts', []))}")
             else:
                 print(f"{r['name']:24} ERROR {r.get('error')}")
+            if r.get("notify_error"):
+                print(f"{r['name']:24} warning: alerts not delivered ({r['notify_error']}); kept for the next run",
+                      file=sys.stderr)
         print(f"wrote {os.path.join(args.out, 'index.html')}")
-        return 3 if any(r["status"] != "ok" for r in summary["devices"]) else 0
+        if any(r["status"] != "ok" for r in summary["devices"]):
+            return 3
+        return 4 if any(r.get("notify_error") for r in summary["devices"]) else 0
 
     if args.cmd == "cert":
         h, p = source.split_host_port(args.host, args.port)

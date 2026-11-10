@@ -73,6 +73,20 @@ def safe_name(s: str) -> str:
     return name or "fortigate"
 
 
+def _other_device(directory: str, snap: Dict[str, Any]) -> bool:
+    """True if the newest snapshot in `directory` is from a device with a different serial number."""
+    serial = (snap.get("device") or {}).get("serial")
+    files = list_snapshots(directory)
+    if not serial or not files:
+        return False
+    try:
+        with open(files[-1], encoding="utf-8") as fh:
+            other = (json.load(fh).get("device") or {}).get("serial")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return bool(other) and other != serial
+
+
 def device_dir(snap: Dict[str, Any], base: str, name: Optional[str] = None) -> str:
     if name:
         return os.path.join(base, safe_name(name))
@@ -83,6 +97,9 @@ def device_dir(snap: Dict[str, Any], base: str, name: Optional[str] = None) -> s
 
 def save_snapshot(snap: Dict[str, Any], base: str, name: Optional[str] = None) -> str:
     d = device_dir(snap, base, name)
+    if name is None and _other_device(d, snap):
+        # two firewalls share a hostname: keep their histories apart, or diffs would compare the two
+        d = f"{d}_{safe_name(str(snap['device']['serial']))}"
     os.makedirs(d, mode=0o700, exist_ok=True)
     while True:  # millisecond stamps keep names unique and in chronological sort order
         # UTC, so names keep sorting chronologically when local clocks go back (DST)

@@ -95,6 +95,8 @@ rulescope audit --host 192.0.2.1 --token-file ~/.rulescope-token --pin-sha256 <f
   --html report.html --cli fix.txt --csv findings.csv --save-snapshot snapshots
 ```
 
+With a certificate from your own CA use `--ca-file ca.pem` instead of the pin. `--insecure` skips verification and exposes the API token to anyone on the path.
+
 Offline, from a config backup (no device access):
 
 ```bash
@@ -195,8 +197,15 @@ Every run compares each device with its previous snapshot. These changes raise a
 - strong-crypto disabled, static-key ciphers enabled, admin TLS weakened, admin idle timeout raised above 15 minutes
 - Password policy, NTP, scheduled FortiGuard updates or private data encryption disabled; USB auto-install enabled
 - SSL-VPN settings changed
+- A local-in deny policy removed, or a local-in policy changed
+- A deny rule for traffic from the internet removed or disabled, or a rule from the internet moved in the sequence
+- An address, service or VIP object (or group) changed that an inbound rule uses
+
+The diff also lists changes to zones, VIP groups and local-in policies.
 
 Send alerts anywhere with a webhook (JSON with a `text` field, which Slack, Mattermost and workflow-style webhooks accept) and/or `--syslog host:514` (RFC 5424, so the SIEM can alert too). Webhook URLs are secrets, so keep them out of the command line: `--webhook-file /etc/rulescope/webhook` (mode 600) or the `RULESCOPE_WEBHOOK` environment variable. Single device: `rulescope collect ... --diff --webhook-file /etc/rulescope/webhook`.
+
+Alerts are not lost when delivery fails: undelivered alerts are kept on disk and sent again with the next run, the dashboard lists the failure, and the command exits with code 4. The dashboard shows the alerts of the last 7 days.
 
 With API access, each change shows who made it (user, GUI/CLI/API and source IP, time), taken from the FortiGate's system event log. Values of password, PSK and key attributes are masked before anything is stored.
 
@@ -208,7 +217,8 @@ With API access, each change shows who made it (user, GUI/CLI/API and source IP,
 - **Comparisons are fair across versions.** "Progress since" only compares checks that both runs evaluated, so new checks in a newer rulescope, or data an older token could not read, never show up as "new" findings.
 - **Internet-facing interfaces** = WAN role ∪ SD-WAN members ∪ default-route egress interfaces ∪ DHCP/PPPoE clients ∪ VIP external interfaces. IPsec tunnels and interfaces whose role is explicitly `lan` or `dmz` are never picked by these guesses, so a default route to an upstream internal network is not misread as the internet. The console and the report list each interface with the reason it was chosen; correct it with `--wan` / `--not-wan`.
 - **Coverage findings** are reported only when provable. FQDN, geography, wildcard, ISDB and VIP objects are treated conservatively. The index that makes this fast is verified against brute force in the tests: 10,000 rules take under a second.
-- **Remediation script.** Rules are disabled (not deleted) with a dated comment. Anything that changes allowed traffic, VPN peers or management reachability is commented out.
+- **Remediation script.** Rules are disabled (not deleted) with a dated comment. Anything that changes allowed traffic, VPN peers or management reachability is commented out, including the removal of Telnet or HTTP from an interface. A zero-hit rule gets a live disable command only when the counters are known to cover at least `--stale-days`; after a recent reboot, or when the period is unknown, the command is commented out.
+- **Not assessed, never a pass.** When an input could not be read (a token without permission, or a partial backup without `config system global`), the practices that depend on it are "Not assessed". This covers interface, SSL-VPN, IPsec and local-in settings and API users. NTP is "Not assessed" when a backup does not set `ntpsync` explicitly, because its default differs between FortiOS versions.
 - **Compliance references** help an auditor find the right control. They are not a certification.
 
 ## Remote audit kit (for the audit service)
@@ -239,13 +249,18 @@ Configs you audit may come from anyone, so rulescope treats every name, comment 
 - **Reports and terminal output** escape or strip markup and terminal control codes; report links must be `https://`.
 - **Files.** Snapshots are written readable only by the owner; reports and fleet pages never for other users (group-readable, for a web server). Device names never escape the output folder.
 - **The API token** is sent only after the certificate check passes (pin or CA). Use a read-only profile and trusted hosts as in section 1.
+- **Redirects are never followed**, so the API token, the NVD key and alert texts only go to the host you configured.
 
 Found a security problem? Report it privately to the maintainer rather than in a public issue.
 
 ## Limits (v0.4.1)
 
 - IPv4 coverage math; IPv6 addresses in unified policies are compared by name.
-- Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet.
+- Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet. Security policies (NGFW policy-based mode), IPv6 policies of FortiOS before 6.4 and IPv6 virtual IPs are not analyzed either: when a device has any, the report says so in its notes instead of showing a clean rule base.
+- Rules that use negated addresses, services or internet services are left out of shadow and redundancy detection.
+- A static route to a named address or internet service is not treated as a default route.
+- A source counts as "anyone" when it is `all`, negated, or covers a /8 or more of public address space (this includes groups built as "everything except ...").
+- A local-in deny only counts as protection when it is always active, has no negated field, applies to every source and its destination is `all` or contains the interface address.
 - Security profiles are checked for presence and botnet blocking, not for full quality (an IPS sensor in monitor mode still counts as IPS).
 - Partial overlaps (rule B only partly covered by A) are not reported, only full coverage.
 - Redundancy, shadow and broad-match checks exclude policies with unsupported ZTNA tags, IPv6 Internet Service or vendor-MAC matching, or address/service negation. Snapshots use schema 4 and retain only the unsupported criterion names. Coverage in schema 1–3 snapshots is unknown because those criteria were discarded; import the original backup or collect again to assess it. Other analysis continues, and excluded policies do not contribute coverage-based cleanup recommendations. Comparisons omit these findings unless both runs fully assessed matching; older findings JSON without completeness information is also excluded.

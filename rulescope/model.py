@@ -31,6 +31,7 @@ POLICY_DEFAULTS = {
     "action": "deny", "status": "enable", "schedule": "", "logtraffic": "utm",
     "nat": "disable", "srcaddr-negate": "disable", "dstaddr-negate": "disable",
     "service-negate": "disable", "internet-service": "disable", "internet-service-src": "disable",
+    "internet-service-negate": "disable", "internet-service-src-negate": "disable",
     "utm-status": "disable", "inspection-mode": "flow", "ssl-ssh-profile": "",
     "av-profile": "", "webfilter-profile": "", "dnsfilter-profile": "", "ips-sensor": "",
     "application-list": "", "emailfilter-profile": "", "file-filter-profile": "",
@@ -163,6 +164,7 @@ def _service(name: str, raw: Dict[str, Any]) -> Dict[str, Any]:
         "sctp-portrange": ranges("sctp-portrange"),
         "protocol-number": _scalar(raw.get("protocol-number"), "0"),
         "icmptype": _scalar(raw.get("icmptype")),
+        "icmpcode": _scalar(raw.get("icmpcode")),
         "iprange": _scalar(raw.get("iprange"), "0.0.0.0"),
         "fqdn": _scalar(raw.get("fqdn")),
         "comment": _scalar(raw.get("comment")),
@@ -258,12 +260,19 @@ def _local_in(pid: Any, raw: Dict[str, Any]) -> Dict[str, Any]:
         "status": _scalar(raw.get("status"), "enable"),
         "schedule": _scalar(raw.get("schedule"), "always"),
         "srcaddr-negate": _scalar(raw.get("srcaddr-negate"), "disable"),
+        "dstaddr-negate": _scalar(raw.get("dstaddr-negate"), "disable"),
+        "service-negate": _scalar(raw.get("service-negate"), "disable"),
     }
 
 
 def _default_route(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     dst = _scalar(raw.get("dst"), "0.0.0.0 0.0.0.0")
     if dst not in ("0.0.0.0 0.0.0.0", "0.0.0.0/0", "0.0.0.0/0.0.0.0"):
+        return None
+    # A route to a named address or an internet service leaves dst at 0.0.0.0/0 but is not a default route.
+    if _names(raw.get("dstaddr")) or _names(raw.get("internet-service-custom")):
+        return None
+    if _scalar(raw.get("internet-service")) not in ("", "0"):
         return None
     if _scalar(raw.get("status"), "enable") == "disable" or _scalar(raw.get("blackhole"), "disable") == "enable":
         return None
@@ -295,6 +304,9 @@ def empty_snapshot(source: str) -> Dict[str, Any]:
         "references": None, "references_source": None, "change_log": None, "notes": [],
         "wan_override": None, "wan_exclude": [],
         "settings": {}, "settings_source": None, "profiles": None, "accprofiles": None, "licenses": None,
+        # inputs that could not be read (token without permission, partial backup): their practices are
+        # reported as "Not assessed" instead of passing by default
+        "unread": [],
     }
 
 
@@ -409,6 +421,10 @@ def _settings_build(single: Callable[[str, str], Optional[Dict[str, Any]]],
     ntp = single("global", "system ntp")
     if ntp is not None and s.get("ntp") is not None:
         s["ntp"]["servers"] = len(ntp.get("ntpserver") or [])
+        # A backup lists ntpsync only when it differs from the default, and that default is not the same
+        # in every FortiOS version: without an explicit value the NTP state is unknown, not "enabled".
+        if "ntpsync" not in ntp:
+            s["ntp"] = None
     ha = single("global", "system ha")
     if ha is not None and s.get("ha") is not None:
         s["ha"]["monitor"] = " ".join(_quoted_names(ha.get("monitor")))
@@ -514,6 +530,31 @@ def _object_refs(snap: Dict[str, Any], root: fgtconf.Block) -> Dict[str, int]:
     return {n: counts.get(n, 0) for n in sorted(names)}
 
 
+# Rule tables rulescope does not analyze. Finding entries there is reported as a note, so a device
+# that keeps its rules in one of them is never shown as having a clean rule base.
+OTHER_POLICY_TABLES = {
+    "firewall security-policy": "security policies (NGFW policy-based mode)",
+    "firewall policy6": "IPv6 policies (FortiOS before 6.4)",
+    "firewall proxy-policy": "proxy policies",
+    "firewall vip6": "IPv6 virtual IPs",
+}
+
+
+def _coverage_notes(counts: Dict[str, int], ngfw_mode: str, central_nat: str) -> List[str]:
+    notes = []
+    found = [f"{n} {OTHER_POLICY_TABLES[p]}" for p, n in counts.items() if n]
+    if found:
+        notes.append("Not analyzed: " + ", ".join(found) + ". rulescope reads 'firewall policy' only, so rule base "
+                     "and exposure results do not cover them.")
+    if ngfw_mode == "policy-based" and not counts.get("firewall security-policy"):
+        notes.append("This VDOM runs in NGFW policy-based mode: its rules are security policies, which rulescope "
+                     "does not analyze.")
+    if central_nat == "enable":
+        notes.append("Central NAT is enabled: virtual IPs apply without being named in a policy, so published "
+                     "services appear as routed inbound rules and VIP-based exposure may be incomplete.")
+    return notes
+
+
 # ---------------------------------------------------------------- from config file
 
 def _settings(b: fgtconf.Block) -> Dict[str, Any]:
@@ -540,12 +581,19 @@ def from_config(text: str, vdom: str = "root") -> Dict[str, Any]:
         "model": hdr.get("model", ""), "vdom": vdom,
         "multi_vdom": fgtconf.is_multi_vdom(root),
     })
-    snap["global"] = _global(_settings(gset), snap["device"]["version"])
+    # A full backup always has "config system global". Without it this is a partial or VDOM-only backup:
+    # device-wide settings are then unknown, not "at their defaults".
+    partial = "system global" not in glob.subs
+    snap["global"] = {} if partial else _global(_settings(gset), snap["device"]["version"])
 
-    def single(scope: str, path: str) -> Dict[str, Any]:
+    def single(scope: str, path: str) -> Optional[Dict[str, Any]]:
+        if scope == "global" and partial:
+            return None
         return _flat((glob if scope == "global" else vd).sub(path))
 
-    def table(scope: str, path: str) -> List[Dict[str, Any]]:
+    def table(scope: str, path: str) -> Optional[List[Dict[str, Any]]]:
+        if scope == "global" and partial:
+            return None
         blk = (glob if scope == "global" else vd).sub(path)
         return [dict(_flat(e), name=n, id=n) for n, e in blk.entries.items()]
 
@@ -601,12 +649,24 @@ def from_config(text: str, vdom: str = "root") -> Dict[str, Any]:
 
     for n, b in glob.sub("system interface").entries.items():
         snap["interfaces"][n] = _interface(n, _settings(b))
-    snap["admins"] = {n: _admin(n, _flat(b)) for n, b in glob.sub("system admin").entries.items()}
-    snap["api_users"] = {}
-    for n, b in glob.sub("system api-user").entries.items():
-        th = [e.get("ipv4-trusthost", "") for e in b.sub("trusthost").entries.values()]
-        th = [t for t in th if t and t not in ("0.0.0.0 0.0.0.0",)]
-        snap["api_users"][n] = {"name": n, "accprofile": b.get("accprofile", ""), "trusthosts": th}
+    if partial:
+        snap["admins"] = snap["api_users"] = None
+        if "system interface" not in glob.subs:
+            snap["unread"].append("interface")
+        snap["notes"].append("This backup has no 'config system global' section (partial or VDOM-only backup): "
+                             "device-wide settings, admin accounts and management access were not assessed.")
+    else:
+        snap["admins"] = {n: _admin(n, _flat(b)) for n, b in glob.sub("system admin").entries.items()}
+        snap["api_users"] = {}
+        for n, b in glob.sub("system api-user").entries.items():
+            th = [e.get("ipv4-trusthost", "") for e in b.sub("trusthost").entries.values()]
+            th = [t for t in th if t and t not in ("0.0.0.0 0.0.0.0",)]
+            snap["api_users"][n] = {"name": n, "accprofile": b.get("accprofile", ""), "trusthosts": th}
+
+    vset = vd.sub("system settings")
+    snap["notes"].extend(_coverage_notes(
+        {path: len(vd.sub(path).entries) for path in OTHER_POLICY_TABLES},
+        vset.get("ngfw-mode", "") or "", vset.get("central-nat", "") or ""))
 
     snap["references"] = _object_refs(snap, root)
     snap["references_source"] = "config"
@@ -767,6 +827,14 @@ def from_api(data: Dict[str, Any], vdom: str = "root") -> Dict[str, Any]:
     for k in ("admin", "api_user"):
         if data.get(k) is None:
             snap["notes"].append(f"Token cannot read system {k.replace('_', '-')}: admin access checks are partial.")
+    snap["unread"] = sorted(k for k in ("interface", "vpn_ssl", "phase1", "local_in", "zone")
+                            if k in data and data[k] is None)
+    vset = (data.get("vdom_settings") or {}).get("results")
+    vset = vset if isinstance(vset, dict) else {}
+    snap["notes"].extend(_coverage_notes(
+        {"firewall security-policy": len(rows("security_policy")), "firewall proxy-policy": len(rows("proxy_policy")),
+         "firewall vip6": len(rows("vip6"))},
+        _scalar(vset.get("ngfw-mode")), _scalar(vset.get("central-nat"))))
     if data.get("config_events") is not None:
         snap["change_log"] = data["config_events"]
     snap["notes"].extend(data.get("errors", []))

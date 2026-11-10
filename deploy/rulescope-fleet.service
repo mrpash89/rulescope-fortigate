@@ -7,13 +7,17 @@ After=network-online.target
 Type=oneshot
 User=rulescope
 Group=rulescope
-# Alerts: put the webhook URL in /etc/rulescope/webhook (mode 600) and add --webhook-file /etc/rulescope/webhook;
-# add --syslog host:514 for the SIEM.
+# Alerts: put RULESCOPE_WEBHOOK=https://... in /etc/rulescope/notify.env (mode 600), or add
+# --webhook-file /etc/rulescope/webhook, and/or --syslog host:514. A webhook URL is a secret:
+# keep it out of this unit file and off the command line.
 # --advisories online needs outbound HTTPS to services.nvd.nist.gov; use "cache" on isolated networks.
-# Optional NVD API key (raises the rate limit): put NVD_API_KEY=... in this file, mode 600.
+# Optional NVD API key (raises the rate limit): put NVD_API_KEY=... in nvd.env, mode 600.
 EnvironmentFile=-/etc/rulescope/nvd.env
-ExecStart=/usr/local/bin/rulescope fleet --inventory /etc/rulescope/fleet.ini --out /var/lib/rulescope/site --snapshots /var/lib/rulescope/snapshots --auditor "Security team" --advisories online --cache-dir /var/lib/rulescope/nvd-cache
+EnvironmentFile=-/etc/rulescope/notify.env
+# Reports describe firewall weaknesses: readable by the rulescope user and group only.
+# Let the web server read them by adding its user to the group: usermod -aG rulescope www-data
 UMask=0027
+ExecStart=/usr/local/bin/rulescope fleet --inventory /etc/rulescope/fleet.ini --out /var/lib/rulescope/site --snapshots /var/lib/rulescope/snapshots --auditor "Security team" --advisories online --cache-dir /var/lib/rulescope/nvd-cache
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
