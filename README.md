@@ -1,4 +1,4 @@
-# rulescope
+# RuleScope
 
 FortiGate security audit, best-practice baseline, rule base cleanup and change control. Read-only, fully on-prem, pure Python 3.9+, zero dependencies.
 
