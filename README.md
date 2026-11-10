@@ -283,11 +283,12 @@ installed-package smoke tests to pass. Benchmark timings are recorded without a
 wall-clock performance threshold. Configure `ci` as a required check in the
 repository's branch rules after the workflow is merged.
 
-Windows runs the full suite as an informational job: private-file writing currently
-uses POSIX `os.fchmod` and permission tests. Python 3.16 prerelease tests are also
-informational and run on the weekly schedule and manual dispatch. These jobs retain
-their failures without blocking `ci`; promote Windows once its compatibility gap
-is resolved. Update the stable matrix and prerelease version as Python releases advance.
+Windows runs the full suite as an informational job. Windows has no POSIX permission
+bits, so the file-mode checks are skipped there: reports and snapshots get the
+permissions of the folder they are written to. On Windows, keep the output folder
+readable only by your account. Python 3.16 prerelease tests are also informational
+and run on the weekly schedule and manual dispatch. These jobs do not block `ci`.
+Update the stable matrix and prerelease version as Python releases advance.
 
 Packaging builds an sdist and then a wheel from it. The wheel is installed without
 dependencies into temporary environments outside the checkout on Python 3.9 and 3.15.

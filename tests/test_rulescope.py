@@ -12,6 +12,8 @@ from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Windows has no POSIX permission bits (os.chmod only toggles read-only): file-mode checks run on POSIX only.
+POSIX_MODES = os.name != "nt"
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 
@@ -895,12 +897,13 @@ class HostileInputTests(unittest.TestCase):
             base = os.path.join(tmp, "snaps")
             path = source.save_snapshot(self.snap, base)       # hostname starts with ".."
             self.assertTrue(os.path.realpath(path).startswith(os.path.realpath(base) + os.sep))
-            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            if POSIX_MODES:
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
             out = os.path.join(tmp, "r.html")
             with redirect_stdout(io.StringIO()):
                 cli.main(["audit", "--config", os.path.join(HERE, "sample.conf"), "--html", out,
                           "--cli", os.path.join(tmp, "fix.txt"), "--advisories", "off"])
-            for f in ("r.html", "fix.txt"):
+            for f in ("r.html", "fix.txt") if POSIX_MODES else ():
                 self.assertEqual(os.stat(os.path.join(tmp, f)).st_mode & 0o007, 0, f)
         finally:
             shutil.rmtree(tmp)
@@ -1268,6 +1271,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(FortiGateAPI("2001:db8::1", "t", port=8443).base, "https://[2001:db8::1]:8443")
         self.assertEqual(FortiGateAPI("192.0.2.1", "t").base, "https://192.0.2.1:443")
 
+    @unittest.skipUnless(POSIX_MODES, "Windows has no POSIX permission bits; files inherit the folder's ACL")
     def test_private_files_are_never_world_readable(self):
         tmp = tempfile.mkdtemp()
         old = os.umask(0o022)

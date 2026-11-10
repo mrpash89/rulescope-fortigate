@@ -55,7 +55,8 @@ class RedactionPrivacyTests(unittest.TestCase):
             self.assertNotIn("SYNTHETIC_", text)
             self.assertIn("Microsoft-Office365", text)
             self.assertIn("SYNTHETIC_CUSTOM_VDOM", mapping.read_text())
-            self.assertEqual(os.stat(mapping).st_mode & 0o777, 0o600)
+            if os.name != "nt":  # Windows has no POSIX permission bits; files inherit the folder's ACL
+                self.assertEqual(os.stat(mapping).st_mode & 0o777, 0o600)
         red, _ = redact(snap)
         self.assertNotIn("SYNTHETIC_CUSTOM_VDOM", json.dumps(red))
         self.assertNotIn("SYNTHETIC_ISDB", json.dumps(red))
