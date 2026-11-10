@@ -22,6 +22,7 @@ from rulescope import checks, cli, diff, fgtconf, firmware, fleet, model, report
 from rulescope.catalog import INTRODUCED_0_4  # noqa: E402
 from rulescope.redact import redact  # noqa: E402
 from rulescope.resolve import Resolver  # noqa: E402
+from rulescope.safety import clean  # noqa: E402
 
 SAMPLE = os.path.join(HERE, "sample.conf")
 
@@ -244,7 +245,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn("    set ssl-min-proto-ver tls1-2", cli_txt)
         self.assertEqual(cli_txt.count('edit "internal"'), 1)  # telnet + http fixed in one block
         csv_txt = report.findings_csv(self.res)
-        self.assertTrue(csv_txt.startswith("﻿severity,check,title"))
+        self.assertTrue(csv_txt.startswith("\ufeffseverity,check,title"))
         self.assertIn("EXPOSED_RISKY", csv_txt)
 
     def test_v1_snapshot_upgrade(self):
@@ -868,6 +869,24 @@ class HostileInputTests(unittest.TestCase):
         self.assertNotIn("\x1b", report.console_summary(self.res))
         self.assertNotIn("\x1b", report.practices_csv(self.res))
 
+    def test_every_invisible_character_is_replaced(self):
+        # direction marks, zero-width characters, soft hyphen and byte order mark, not only a fixed list
+        for ch in ("\u061c", "\u200b", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\U000e0001"):
+            self.assertEqual(clean("a" + ch + "b"), "a?b", repr(ch))
+            snap = model.from_config(f'config firewall address\n    edit "a{ch}b"\n    next\nend\n')
+            self.assertEqual(list(snap["addresses"]), ["a?b"], repr(ch))
+        self.assertEqual(clean("Tāmaki-אבג-名前 ·"), "Tāmaki-אבג-名前 ·")     # visible text is untouched
+
+    def test_policy_entries_without_a_numeric_id_are_ignored_with_a_note(self):
+        cfg = ('config firewall policy\n    edit 5\n        set action accept\n    next\n'
+               '    edit "x"\n        set action accept\n    next\n    edit -1\n    next\nend\n'
+               'config firewall local-in-policy\n    edit "y"\n    next\n    edit 2\n    next\nend\n')
+        snap = model.from_config(cfg)
+        self.assertEqual([p["policyid"] for p in snap["policies"]], [5])
+        self.assertEqual([p["policyid"] for p in snap["local_in"]], [2])
+        self.assertTrue(any(n.startswith("3 policy entries") for n in snap["notes"]), snap["notes"])
+        self.assertTrue(any("3 policy entries" in n for n in checks.analyze(snap)["notes"]))
+
     def test_api_data_and_loaded_files_are_cleaned(self):
         snap = model.from_api({"status": {"results": {"hostname": "fw\nevil", "version": "v7.4.3"}},
                                "policy": {"results": [{"policyid": 1, "name": "a\nexecute x", "srcintf": [{"name": "p1"}],
@@ -892,6 +911,10 @@ class HostileInputTests(unittest.TestCase):
             n = source.safe_name(bad)
             self.assertFalse(n.startswith("."), bad)
             self.assertNotIn("/", n)
+        self.assertEqual(source.safe_name("fw."), "fw")                # Windows drops a trailing dot
+        self.assertEqual(source.safe_name("NUL"), "_NUL")              # Windows device names
+        self.assertEqual(source.safe_name("com1.lab"), "_com1.lab")
+        self.assertEqual(source.safe_name("console"), "console")
         tmp = tempfile.mkdtemp()
         try:
             base = os.path.join(tmp, "snaps")
@@ -1361,7 +1384,7 @@ class SecurityReviewTests(unittest.TestCase):
         res = checks.analyze(snap)
         self.assertIn(evil, by_check(res)["UNUSED_OBJECT"])
         for txt in (report.findings_csv(res), report.practices_csv(res)):
-            for row in csv.reader(io.StringIO(txt.lstrip("﻿"))):
+            for row in csv.reader(io.StringIO(txt.lstrip("\ufeff"))):
                 for cell in row:
                     self.assertFalse(cell.startswith(("=", "+", "-", "@")), cell)
 

@@ -12,20 +12,34 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import unicodedata
 from typing import Any
 
 # Line breaks and tabs become spaces; every other C0/C1 control, DEL and the Unicode
 # direction/line-separator characters (used to make text display differently than it reads)
 # become "?" so tampering stays visible.
-_WS = re.compile(r"[\t\n\r\x0b\x0c  \x85]")
-_CTRL = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f‎‏‪-‮⁦-⁩]")
+_WS = re.compile(r"[\t\n\r\x0b\x0c\u2028\u2029\x85]")
+_CTRL = re.compile(r"[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+# Unicode categories that never show as a character of their own: controls, format characters
+# (direction marks, zero-width characters, soft hyphen, byte order mark) and line/paragraph separators.
+_INVISIBLE = ("Cc", "Cf", "Zl", "Zp")
+
+
+def _visible(s: str) -> str:
+    """Replace every remaining invisible character. The list in _CTRL covers the common ones fast;
+    this covers all of them, for whatever Unicode version this Python knows."""
+    if s.isascii():
+        return s
+    return "".join("?" if unicodedata.category(c) in _INVISIBLE else c for c in s)
 
 
 def clean(s: Any) -> Any:
     """One-line safe text. Non-strings are returned unchanged."""
     if not isinstance(s, str):
         return s
-    return _CTRL.sub("?", _WS.sub(" ", s))
+    return _visible(_CTRL.sub("?", _WS.sub(" ", s)))
 
 
 def clean_tree(obj: Any) -> Any:
@@ -41,7 +55,8 @@ def clean_tree(obj: Any) -> Any:
 
 def clean_multiline(s: str) -> str:
     """Terminal output: keeps line breaks we produced, removes escape codes and other controls."""
-    return "\n".join(_CTRL.sub("?", re.sub(r"[\t\r\x0b\x0c  \x85]", " ", ln)) for ln in s.split("\n"))
+    return "\n".join(_visible(_CTRL.sub("?", re.sub(r"[\t\r\x0b\x0c\u2028\u2029\x85]", " ", ln)))
+                     for ln in s.split("\n"))
 
 
 def csv_cell(v: Any) -> Any:

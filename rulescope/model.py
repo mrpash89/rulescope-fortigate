@@ -15,6 +15,7 @@ from . import fgtconf
 from .safety import clean_tree
 
 SCHEMA = 4
+_ID_RE = re.compile(r"[0-9]{1,10}")  # policy IDs in a config backup
 
 POLICY_LIST_FIELDS = [
     "srcintf", "dstintf", "srcaddr", "dstaddr", "srcaddr6", "dstaddr6", "service",
@@ -602,7 +603,11 @@ def from_config(text: str, vdom: str = "root") -> Dict[str, Any]:
     snap["profiles"] = _profiles_build(table)
     snap["accprofiles"] = _accprofiles(table("global", "system accprofile"))
 
+    bad_ids = 0  # FortiOS only accepts numeric IDs here: anything else is damage or tampering, not a rule
     for pid, b in vd.sub("firewall policy").entries.items():
+        if not _ID_RE.fullmatch(pid):
+            bad_ids += 1
+            continue
         snap["policies"].append(_policy(pid, _settings(b)))
     for n, b in vd.sub("firewall address").entries.items():
         snap["addresses"][n] = _address(n, _settings(b))
@@ -641,7 +646,14 @@ def from_config(text: str, vdom: str = "root") -> Dict[str, Any]:
     for n, b in vd.sub("vpn ipsec phase2-interface").entries.items():
         snap["ipsec_p2"][n] = _phase2(n, _settings(b))
     for pid, b in vd.sub("firewall local-in-policy").entries.items():
+        if not _ID_RE.fullmatch(pid):
+            bad_ids += 1
+            continue
         snap["local_in"].append(_local_in(pid, _settings(b)))
+    if bad_ids:
+        snap["notes"].append(f"{bad_ids} policy entr{'y' if bad_ids == 1 else 'ies'} in the backup had an ID that is "
+                             "not a number and were ignored. FortiOS does not write such entries: the file may be "
+                             "damaged or altered.")
     for _, b in vd.sub("router static").entries.items():
         r = _default_route(_settings(b))
         if r:

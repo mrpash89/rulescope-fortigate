@@ -67,9 +67,15 @@ def take_snapshot(*, host: Optional[str] = None, config: Optional[str] = None, p
     return snap
 
 
+_WINDOWS_DEVICES = re.compile(r"(?i)^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)")
+
+
 def safe_name(s: str) -> str:
-    """A file or folder name from untrusted text: no separators, no leading dots ('..', hidden files)."""
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", s or "").lstrip(".")[:100]
+    """A file or folder name from untrusted text: no separators, no leading dots ('..', hidden files),
+    no trailing dots and no Windows device name (Windows drops the dot and cannot create 'nul')."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", s or "").lstrip(".")[:100].rstrip(".")
+    if _WINDOWS_DEVICES.match(name):
+        name = "_" + name
     return name or "fortigate"
 
 
