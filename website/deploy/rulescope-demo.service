@@ -1,0 +1,22 @@
+[Unit]
+Description=Build the RuleScope demo website (static files from synthetic configs)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=rsdemo
+Group=rsdemo
+# /etc/rulescope-demo.env:
+#   SITE_URL=https://demo.example.com
+#   ADVISORIES=off          (or "online": known CVEs from the NIST NVD, needs outbound HTTPS)
+EnvironmentFile=/etc/rulescope-demo.env
+# Update the checkout first. If GitHub cannot be reached, build from what is there.
+ExecStartPre=-/usr/bin/git -C /opt/rulescope-fortigate pull --ff-only --quiet
+ExecStart=/usr/bin/python3 /opt/rulescope-fortigate/website/build.py --out /srv/rulescope-demo --site-url ${SITE_URL} --advisories ${ADVISORIES} --cache-dir /var/cache/rulescope-demo
+UMask=0022
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/srv/rulescope-demo /opt/rulescope-fortigate /var/cache/rulescope-demo

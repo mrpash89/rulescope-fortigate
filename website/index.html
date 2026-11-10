@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RuleScope: FortiGate audit, cleanup and change control</title>
+<meta name="description" content="RuleScope audits a FortiGate from a config backup or its read-only API: internet exposure, dead and redundant rules, device hardening, firmware CVEs and a 37-practice baseline. Read-only, on your own machine, Python standard library only.">
+<meta property="og:title" content="RuleScope: FortiGate audit, cleanup and change control">
+<meta property="og:description" content="See what your FortiGate really allows. Open-source, read-only, runs on your own machine. Browse live sample reports.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{site_url}}/">
+<meta property="og:image" content="{{site_url}}/img/report-overview.png">
+<link rel="canonical" href="{{site_url}}/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 3.5 5.5v6.2c0 5 3.6 9.3 8.5 10.3 4.9-1 8.5-5.3 8.5-10.3V5.5z' fill='%2313304f'/%3E%3Cpath d='M7.5 12h9M7.5 8.5h9M7.5 15.5h5' stroke='%23fff' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+/* Colors are the Harbor palette of the RuleScope reports, so this page and the samples read as one product. */
+:root {
+  color-scheme: light;
+  --bg: #eef1f5; --surface: #ffffff; --surface-2: #f6f8fa; --surface-3: #eceff3;
+  --ink: #121826; --ink-2: #4a5466; --ink-3: #6f7889; --line: #e1e5eb; --line-2: #cdd3dc;
+  --link: #1d5fb8; --brand: #13304f; --brand-2: #1d4a75; --on-brand: #ffffff;
+  --sev-high: #d03b3b; --sev-medium: #ec835a; --sev-low: #fab219; --sev-info: #8a919c; --good: #0ca30c;
+  --sev-high-bg: #fbeaea; --bad-ink: #b42318; --good-ink: #006300;
+  --a-exposure: #d55181; --a-rules: #2a78d6; --a-device: #1baf7a; --a-monitoring: #6250d6; --a-vpn: #008300;
+  --a-objects: #7c8596; --a-firmware: #b7791f;
+  --code-bg: #0f1720; --code-ink: #dbe4ee; --code-dim: #8b98a9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0c1016; --surface: #141a22; --surface-2: #19202a; --surface-3: #212a35;
+    --ink: #e6ebf2; --ink-2: #aeb7c5; --ink-3: #8a95a7; --line: #252d38; --line-2: #323c49;
+    --link: #7fb2f0; --brand: #0f2338; --brand-2: #17375a; --on-brand: #e6ebf2;
+    --sev-high-bg: rgba(208, 59, 59, .2); --bad-ink: #ff8a80; --good-ink: #3fc93f;
+    --a-rules: #3987e5; --a-device: #199e70; --a-monitoring: #9085e9; --a-objects: #8590a2; --a-firmware: #d39a3c;
+    --code-bg: #0a0e13; --code-ink: #d5dee9;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+}
+h1, h2, h3 { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, Arial, sans-serif; margin: 0; }
+a { color: var(--link); text-underline-offset: .18em; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 3px; }
+code, pre, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+@media (max-width: 560px) { .wrap { padding: 0 16px; } }
+
+/* ---- top bar ---- */
+.top { background: var(--brand); color: var(--on-brand); }
+.top .wrap { display: flex; align-items: center; gap: 24px; min-height: 56px; }
+.logo { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 1.05rem; color: inherit; text-decoration: none; }
+.top nav { margin-left: auto; display: flex; gap: 22px; flex-wrap: wrap; }
+.top nav a { color: inherit; opacity: .86; text-decoration: none; font-size: .95rem; }
+.top nav a:hover { opacity: 1; text-decoration: underline; }
+.top a:focus-visible { outline-color: var(--on-brand); }
+@media (max-width: 700px) { .top nav a.opt { display: none; } }
+
+/* ---- hero ---- */
+.hero { padding-top: 64px; padding-bottom: 28px; }
+.hero h1 {
+  font-size: clamp(2.3rem, 6.2vw, 4.3rem); line-height: 1.02; letter-spacing: -.035em; font-weight: 700;
+  max-width: 15ch;
+}
+.lead { font-size: clamp(1.05rem, 1.6vw, 1.22rem); line-height: 1.5; color: var(--ink-2); max-width: 62ch; margin: 22px 0 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 28px; }
+.btn {
+  display: inline-block; background: var(--brand-2); color: #fff; text-decoration: none; font-weight: 600;
+  padding: 12px 20px; border-radius: 8px;
+}
+.btn:hover { background: var(--brand); }
+@media (prefers-color-scheme: dark) { .btn { background: #2a66a3; } .btn:hover { background: #3476ba; } }
+.actions .plain { font-weight: 600; }
+
+/* ---- the rule base, as RuleScope reads it ---- */
+.scope { margin: 36px 0 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.scope figcaption {
+  display: flex; flex-wrap: wrap; gap: 6px 28px; align-items: baseline; padding: 16px 20px;
+  border-bottom: 1px solid var(--line); background: var(--surface-2);
+}
+.scope figcaption strong { font-size: 1.02rem; }
+.scope figcaption span { color: var(--ink-2); font-size: .93rem; }
+.scope figcaption a { margin-left: auto; font-weight: 600; font-size: .93rem; white-space: nowrap; }
+.scroll { overflow-x: auto; }
+table.rules { border-collapse: collapse; width: 100%; font-size: .9rem; }
+.rules th {
+  text-align: left; font-weight: 600; color: var(--ink-3); font-size: .8rem; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.rules td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.rules tr:last-child td { border-bottom: 0; }
+.rules th:first-child, .rules td:first-child { padding-left: 20px; }
+.rules .num { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rules .name { font-weight: 600; white-space: nowrap; }
+.rules .name a { color: inherit; text-decoration: none; }
+.rules .name a:hover { text-decoration: underline; }
+.rules .mono { font-size: .84rem; color: var(--ink-2); }
+.rules .accept { color: var(--good-ink); font-weight: 600; }
+.rules .deny { color: var(--bad-ink); font-weight: 600; }
+.rules tr.off td { color: var(--ink-3); }
+.rules tr.off .name, .rules tr.off .accept { color: var(--ink-3); font-weight: 400; }
+.rules tr.high td { background: var(--sev-high-bg); }
+.found { min-width: 17rem; }
+.found div { display: flex; gap: 8px; align-items: baseline; }
+.found div + div { margin-top: 3px; }
+.sev { flex: none; font-size: .78rem; font-weight: 650; width: 5.6em; white-space: nowrap; }
+.sev::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: currentColor; }
+.sev.high { color: var(--sev-high); } .sev.medium { color: var(--sev-medium); }
+.sev.low { color: #b98100; } .sev.info { color: var(--sev-info); }
+@media (prefers-color-scheme: dark) { .sev.low { color: var(--sev-low); } }
+.found .none { color: var(--ink-3); }
+@media (max-width: 860px) { .rules .addr { display: none; } }
+@media (max-width: 620px) {
+  /* a phone has no room for a table: each rule becomes a block with its findings underneath */
+  .rules thead, .rules .intf, .rules .svc { display: none; }
+  .rules, .rules tbody { display: block; }
+  .rules tr { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 10px; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+  .rules tr:last-child { border-bottom: 0; }
+  .rules td, .rules td:first-child { padding: 0; border: 0; background: none; }
+  .rules tr.high { background: var(--sev-high-bg); }
+  .rules tr.high td { background: none; }
+  .rules .name { white-space: normal; }
+  .found { grid-column: 1 / -1; min-width: 0; margin-top: 4px; }
+}
+
+/* ---- sections ---- */
+section { padding: 72px 0 0; }
+section h2 { font-size: clamp(1.5rem, 3vw, 2.05rem); letter-spacing: -.02em; line-height: 1.15; max-width: 24ch; }
+section > .wrap > p.intro { color: var(--ink-2); max-width: 66ch; margin: 14px 0 0; }
+
+.samples { list-style: none; margin: 28px 0 0; padding: 0; border-top: 1px solid var(--line-2); }
+.samples li { display: grid; grid-template-columns: minmax(0, 19rem) minmax(0, 1fr); gap: 4px 32px; padding: 16px 0; border-bottom: 1px solid var(--line-2); }
+.samples a { font-weight: 650; font-size: 1.05rem; }
+.samples p { margin: 0; color: var(--ink-2); max-width: 64ch; }
+.samples .alerts { margin: 6px 0 0; padding: 0; list-style: none; font-size: .93rem; color: var(--ink); }
+.samples .alerts li { display: block; padding: 0; border: 0; }
+.samples .alerts li::before { content: "!"; color: var(--sev-high); font-weight: 700; margin-right: 8px; }
+@media (max-width: 700px) { .samples li { grid-template-columns: 1fr; } }
+
+.areas { margin: 28px 0 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 28px 40px; }
+.areas div { border-left: 4px solid var(--c); padding-left: 16px; }
+.areas dt { font-weight: 650; font-size: 1.05rem; }
+.areas dd { margin: 4px 0 0; color: var(--ink-2); }
+.note { margin: 32px 0 0; color: var(--ink-2); max-width: 70ch; }
+
+.steps { margin: 28px 0 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 26px; }
+.steps li { counter-increment: step; display: grid; grid-template-columns: 2.2rem minmax(0, 1fr); }
+.steps li::before { content: counter(step); font-weight: 700; font-size: 1.15rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.steps h3 { font-size: 1.05rem; font-weight: 650; }
+.steps p { margin: 4px 0 0; color: var(--ink-2); max-width: 66ch; }
+pre {
+  margin: 12px 0 0; background: var(--code-bg); color: var(--code-ink); padding: 14px 16px; border-radius: 8px;
+  overflow-x: auto; font-size: .86rem; line-height: 1.6; tab-size: 4;
+}
+pre .c { color: var(--code-dim); }
+
+.facts { margin: 28px 0 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 26px 40px; }
+.facts h3 { font-size: 1.05rem; font-weight: 650; }
+.facts p { margin: 4px 0 0; color: var(--ink-2); }
+
+footer { margin-top: 88px; border-top: 1px solid var(--line-2); padding: 28px 0 44px; color: var(--ink-2); font-size: .92rem; }
+footer .wrap { display: grid; gap: 10px; }
+footer nav { display: flex; flex-wrap: wrap; gap: 6px 22px; }
+footer p { margin: 0; max-width: 80ch; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="logo" href="./">
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3.5 5.5v6.2c0 5 3.6 9.3 8.5 10.3 4.9-1 8.5-5.3 8.5-10.3V5.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M7.5 12h9M7.5 8.5h9M7.5 15.5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      RuleScope
+    </a>
+    <nav aria-label="Page">
+      <a href="#samples">Sample reports</a>
+      <a class="opt" href="#checks">What it checks</a>
+      <a class="opt" href="#run">Run it</a>
+      <a href="{{repo_url}}">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<div class="wrap hero">
+  <h1>See what your FortiGate really allows.</h1>
+  <p class="lead">RuleScope reads a FortiGate config backup, or the firewall itself through a read-only API token, and shows what is reachable from the internet, which rules are dead or redundant, where the device is not hardened, and what changed since the last run. It runs on your own machine with nothing but Python.</p>
+  <div class="actions">
+    <a class="btn" href="demo/">Open the sample fleet dashboard</a>
+    <a class="plain" href="{{repo_url}}">Get RuleScope on GitHub</a>
+  </div>
+
+  <figure class="scope">
+    <figcaption>
+      <strong>{{hq_hostname}}, a fictional {{hq_model}}</strong>
+      <span>{{hq_rules}} rules as RuleScope reads them. Score {{hq_score}} of 100, {{hq_high}} high-severity findings.</span>
+      <a href="demo/HQ/report.html">Open the full report</a>
+    </figcaption>
+    <div class="scroll">
+      <table class="rules">
+        <thead><tr>
+          <th scope="col">ID</th><th scope="col">Rule</th><th scope="col" class="intf">From, to</th>
+          <th scope="col" class="addr">Source, destination</th><th scope="col" class="svc">Service</th>
+          <th scope="col">Action</th><th scope="col">What RuleScope found</th>
+        </tr></thead>
+        <tbody>
+{{hq_rows}}
+        </tbody>
+      </table>
+    </div>
+  </figure>
+</div>
+
+<section id="samples">
+  <div class="wrap">
+    <h2>Open the sample output</h2>
+    <p class="intro">Everything linked here is real RuleScope {{version}} output, rebuilt every night from the current code. The three firewalls are fictional, so nothing on this site describes a real network.</p>
+    <ul class="samples">
+      <li><a href="demo/">Fleet dashboard</a>
+        <p>Three firewalls on one page: score, internet exposure, firmware support status and what changed since the previous run.</p></li>
+      <li><a href="demo/HQ/report.html">Audit report for {{hq_hostname}}</a>
+        <p>The report you hand to a client or keep for an audit: summary, priority actions, quick wins, exposure map, the {{practices_total}}-practice baseline with evidence, and a compliance appendix. Light and dark, five palettes, prints cleanly.</p></li>
+      <li><a href="demo/Branch-South/changes.html">Change report for {{south_hostname}}</a>
+        <div><p>Two runs, and between them someone changed the firewall. RuleScope raised these alerts:</p>
+{{south_alerts}}</div></li>
+      <li><a href="demo/HQ/fix.txt">Remediation script</a>
+        <p>FortiOS commands for the findings. Anything that changes traffic, VPN peers or management access is commented out until you have reviewed it.</p></li>
+      <li><a href="demo/HQ/findings.csv">Findings as CSV</a>
+        <p>One row per finding with severity, effort and compliance references, for Excel or a ticket system. The <a href="demo/HQ/practices.csv">baseline is a CSV</a> too, and everything is available as <a href="demo/HQ/findings.json">JSON</a>.</p></li>
+    </ul>
+  </div>
+</section>
+
+<section id="checks">
+  <div class="wrap">
+    <h2>What it checks</h2>
+    <dl class="areas">
+      <div style="--c: var(--a-exposure)"><dt>Internet exposure</dt>
+        <dd>Every service reachable from outside: port forwards, static NAT, routed inbound rules, admin GUI or SSH on WAN, the SSL-VPN portal. Risky services such as RDP, SMB and databases are called out, and severity depends on who can reach them.</dd></div>
+      <div style="--c: var(--a-rules)"><dt>Rule base</dt>
+        <dd>Deny rules that never apply, accept rules that can never match, redundant rules with the covering rule named, any-to-any, unrestricted outbound, zero-hit and stale rules, expired schedules.</dd></div>
+      <div style="--c: var(--a-device)"><dt>Device hardening</dt>
+        <dd>Telnet and HTTP management, trusted hosts, admins without MFA, the default admin account, lockout and password policy, TLS versions, strong-crypto, SNMP, NTP, HA.</dd></div>
+      <div style="--c: var(--a-firmware)"><dt>Firmware</dt>
+        <dd>FortiOS end-of-support dates, and the CVEs that affect the exact version from the NIST NVD, flagged when CISA lists them as exploited.</dd></div>
+      <div style="--c: var(--a-monitoring)"><dt>Logging and inspection</dt>
+        <dd>Accept rules without logging, no central logging, internet-bound rules without IPS, antivirus, DNS filter or application control, expired subscriptions.</dd></div>
+      <div style="--c: var(--a-vpn)"><dt>VPN</dt>
+        <dd>Weak IPsec proposals and DH groups, aggressive mode with a pre-shared key, phase 2 without PFS, SSL-VPN on old TLS or the factory certificate.</dd></div>
+      <div style="--c: var(--a-objects)"><dt>Objects</dt>
+        <dd>Addresses, groups, services and virtual IPs that nothing references.</dd></div>
+    </dl>
+    <p class="note">On top of the checks, a baseline of {{practices_total}} practices from Fortinet's hardening guide and the CIS FortiGate benchmark is marked pass, partial, fail or not assessed, with the evidence from your configuration. A setting RuleScope could not read never counts as a pass.</p>
+  </div>
+</section>
+
+<section id="run">
+  <div class="wrap">
+    <h2>Run it on your own firewall</h2>
+    <p class="intro">You need Python 3.9 or later and nothing else.</p>
+    <ol class="steps">
+      <li><div><h3>Get RuleScope</h3>
+<pre>git clone {{repo_url}}.git
+cd rulescope-fortigate</pre></div></li>
+      <li><div><h3>Audit a config backup</h3>
+        <p>Works offline, on a backup you downloaded or one a client sent you.</p>
+<pre>python3 -m rulescope audit --config backup.conf --html report.html --cli fix.txt --csv findings.csv</pre></div></li>
+      <li><div><h3>Or read the firewall directly</h3>
+        <p>With a read-only API token you also get hit counts, licenses and the change log. The certificate fingerprint is checked before the token is sent.</p>
+<pre>python3 -m rulescope cert --host 192.0.2.1          <span class="c"># prints the SHA-256 fingerprint</span>
+python3 -m rulescope audit --host 192.0.2.1 --token-file ~/.rulescope-token \
+    --pin-sha256 FINGERPRINT --html report.html</pre></div></li>
+    </ol>
+    <p class="note">The <a href="{{repo_url}}#readme">README</a> covers the read-only API user, fleet mode, scheduled change tracking and alerts.</p>
+  </div>
+</section>
+
+<section id="safe">
+  <div class="wrap">
+    <h2>Built to run next to production</h2>
+    <div class="facts">
+      <div><h3>It never changes a firewall</h3>
+        <p>RuleScope only reads. Fixes come as a script that you review and paste yourself.</p></div>
+      <div><h3>Your configuration stays with you</h3>
+        <p>No cloud service, no account, no telemetry. The only optional outbound request is the CVE lookup at the NIST NVD, and it sends a FortiOS version number.</p></div>
+      <div><h3>Nothing to install</h3>
+        <p>Python standard library only, with no third-party packages to vet or update.</p></div>
+      <div><h3>Configs are treated as hostile</h3>
+        <p>A backup can come from anyone. Names and comments in it cannot become script commands, spreadsheet formulas or markup, and randomized tests check that on every change.</p></div>
+      <div><h3>Open source</h3>
+        <p>Apache-2.0. Read the code, run the tests, send a pull request.</p></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <nav aria-label="Project">
+      <a href="{{repo_url}}">GitHub</a>
+      <a href="{{repo_url}}/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="{{repo_url}}/blob/main/SECURITY.md">Security policy</a>
+      <a href="{{repo_url}}/blob/main/LICENSE">License</a>
+    </nav>
+    <p>RuleScope {{version}}. This page and its samples were built on {{built}} UTC from synthetic data.</p>
+    <p>FortiGate and FortiOS are trademarks of Fortinet, Inc. RuleScope is an independent project and is not affiliated with or endorsed by Fortinet.</p>
+  </div>
+</footer>
+
+</body>
+</html>
