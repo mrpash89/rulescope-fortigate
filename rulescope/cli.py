@@ -115,9 +115,11 @@ def _outputs(snap: Dict[str, Any], args: argparse.Namespace) -> int:
             apply_wan(baseline, args.wan, args.not_wan)
     redacted = False
     if args.redact:
+        if baseline is not None and "findings" in baseline:
+            raise SystemExit("--redact requires a snapshot baseline; findings JSON can contain original identifiers")
         snap, mapping = redact(snap)
-        if baseline is not None and "findings" not in baseline:
-            baseline, _ = redact(baseline)
+        if baseline is not None:
+            baseline, mapping = redact(baseline, mapping)
         redacted = True
         if args.redact_map:
             source.write_private(args.redact_map, json.dumps(mapping, indent=1, ensure_ascii=False))
@@ -244,6 +246,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_firmware(fw)
 
     args = ap.parse_args(argv)
+
+    if getattr(args, "redact", False) and getattr(args, "save_snapshot", None):
+        ap.error("--redact cannot be combined with --save-snapshot; use collect separately to save a private snapshot")
 
     if args.cmd == "audit":
         snap = _snapshot_from_args(args)

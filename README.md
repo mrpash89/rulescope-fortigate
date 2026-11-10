@@ -106,13 +106,15 @@ Useful options:
 |---|---|
 | `--usage FILE --usage-since DATE` | Hit counts from a SIEM, FortiAnalyzer or the FortiGate's own JSON (section 3) |
 | `--baseline OLD.json` | Adds "Progress since ..." (score change, resolved and new findings). Takes a snapshot or a findings JSON. |
-| `--redact [--redact-map map.json]` | Pseudonymizes names, published IPs, hostname and serial in every output. Findings are identical. Use it for sales samples or to share output for support. |
+| `--redact [--redact-map map.json]` | Pseudonymizes names (including custom VDOMs and Internet Services), published IPs, hostname and serial, and removes imported usage filenames from reports. Findings are identical. With `--baseline`, use a snapshot rather than findings JSON so both reports share one mapping. Keep the reverse map private. |
 | `--wan port1,port2` / `--not-wan port10` | Set the internet-facing interfaces yourself, or remove wrongly detected ones (zone names work too). Fleet inventory keys: `wan =`, `not_wan =` |
 | `--advisories online` | Look up known CVEs for this FortiOS version in the NIST NVD (section 4) |
 | `--palette forest` | Default palette of the report: `harbor`, `forest`, `ocean`, `graphite`, `contrast`. Readers can still switch it, and light/dark. |
 | `--practices-csv baseline.csv` | The best-practice baseline as a spreadsheet with owner and target-date columns |
 | `--fail-on high` | Exit code 2 when anything at that severity or above is found (cron/CI) |
 | `--host 192.0.2.1:8443`, `--vdom DMZ`, `--ca-file` | Non-default admin port, other VDOM, proper certificate verification |
+
+`--redact` cannot be combined with `--save-snapshot`: saved snapshots retain the original data needed for later analysis. Use `collect` separately to save a private snapshot. Client and auditor labels are supplied explicitly and are kept as entered.
 
 ## 3. Usage data that survives reboots
 

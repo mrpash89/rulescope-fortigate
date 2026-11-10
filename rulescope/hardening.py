@@ -281,6 +281,15 @@ def profile_usage(snap: Dict[str, Any], r: Resolver, wan: Set[str]) -> Dict[str,
 
 # ---------------------------------------------------------------- rule base additions
 
+def isdb_source_is_known_bad(p: Dict[str, Any]) -> bool:
+    # Redaction removes names after preserving the classification used by this check.
+    if "_redacted_isdb_bad_source" in p:
+        return p["_redacted_isdb_bad_source"]
+    names = [v for f in ("internet-service-src-name", "internet-service-src-group", "internet-service-src-custom",
+                         "internet-service-src-custom-group") for v in p.get(f, [])]
+    return any(_ISDB_BAD.search(n) for n in names) or bool(p.get("internet-service-src-id"))
+
+
 def isdb_deny_rules(snap: Dict[str, Any], r: Resolver, wan: Set[str]) -> List[Dict[str, Any]]:
     out = []
     for p in snap["policies"]:
@@ -289,9 +298,7 @@ def isdb_deny_rules(snap: Dict[str, Any], r: Resolver, wan: Set[str]) -> List[Di
         src_if = r.interfaces(p["srcintf"])
         if src_if is not None and not set(src_if) & wan:
             continue
-        names = [v for f in ("internet-service-src-name", "internet-service-src-group", "internet-service-src-custom",
-                             "internet-service-src-custom-group") for v in p.get(f, [])]
-        if any(_ISDB_BAD.search(n) for n in names) or p.get("internet-service-src-id"):
+        if isdb_source_is_known_bad(p):
             out.append(p)
     return out
 
