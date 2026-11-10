@@ -43,7 +43,7 @@ python3 -m pip install .          # or: pipx install .
 rulescope --version
 ```
 
-No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.1.pyz ...`.
+No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.2.pyz ...`.
 
 ## 1. Read-only API user on the FortiGate
 
@@ -253,7 +253,7 @@ Configs you audit may come from anyone, so rulescope treats every name, comment 
 
 Found a security problem? Report it privately to the maintainer rather than in a public issue.
 
-## Limits (v0.4.1)
+## Limits (v0.4.2)
 
 - IPv4 coverage math; IPv6 addresses in unified policies are compared by name.
 - Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet. Security policies (NGFW policy-based mode), IPv6 policies of FortiOS before 6.4 and IPv6 virtual IPs are not analyzed either: when a device has any, the report says so in its notes instead of showing a clean rule base.

@@ -308,7 +308,7 @@ def dashboard(summary: Dict[str, Any], palette: str = "harbor") -> str:
         ver_rows.append(f'<tr><td class="mono">{e(v)}</td><td><span class="pill {cls}">{e(txt)}</span></td>'
                         f'<td class="mono">{e(eos)}</td><td>{cves}</td><td class="num">{n}</td>'
                         f'<td>{e(", ".join(r["name"] for r in ok if (r.get("version") or "?") == v))}</td></tr>')
-    def recent(r: Dict[str, Any]) -> List[Dict[str, str]]:  # summaries written before 0.4.1 have no history
+    def recent(r: Dict[str, Any]) -> List[Dict[str, str]]:  # summaries written before 0.4.2 have no history
         return r.get("recent_alerts") or [{"t": r.get("when", ""), "a": a} for a in r.get("alerts", [])]
 
     alert_rows = "".join(f'<tr><td>{e(r["label"])}</td><td class="mono">{e(str(x.get("t", ""))[:16].replace("T", " "))}</td>'
