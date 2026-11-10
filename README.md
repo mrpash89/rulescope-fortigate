@@ -4,6 +4,8 @@ FortiGate security audit, best-practice baseline, rule base cleanup and change c
 
 One firewall or a whole fleet, from the live REST API or from a config backup a client emails you.
 
+**Live demo: [rulescope.mrpash.com](https://rulescope.mrpash.com)** has a fleet dashboard, audit reports, a change report and a remediation script, built from synthetic configs and rebuilt every night from this repository.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/report-overview-dark.png">
   <img alt="Audit report overview: security score, high-severity findings, internet exposure, firmware, best-practice baseline, quick wins and cleanup potential" src="docs/images/report-overview.png">
@@ -29,7 +31,7 @@ Outputs: client-ready HTML report (key tiles, executive summary, priority action
 
 ## Screenshots
 
-All screenshots come from the demo site in [`examples/demo-site`](examples/demo-site) (three made-up firewalls; addresses are documentation ranges).
+All screenshots come from the demo site in [`examples/demo-site`](examples/demo-site) (three made-up firewalls; addresses are documentation ranges). The same three firewalls are live at [rulescope.mrpash.com/demo](https://rulescope.mrpash.com/demo/), built by [`website/`](website/).
 
 | | |
 |---|---|
