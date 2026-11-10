@@ -259,6 +259,34 @@ python3 -m unittest discover -s tests -v
 python3 tests/bench.py 10000          # performance on a synthetic 10k-rule base
 ```
 
+### Continuous integration and release preparation
+
+GitHub Actions runs the full suite on Linux with Python 3.9–3.15 and on macOS with
+Python 3.15 for every pull request and push to `main`. The `ci` check requires all
+of those tests, the synthetic 10,000-policy benchmark, distribution builds and
+installed-package smoke tests to pass. Benchmark timings are recorded without a
+wall-clock performance threshold. Configure `ci` as a required check in the
+repository's branch rules after the workflow is merged.
+
+Windows runs the full suite as an informational job: private-file writing currently
+uses POSIX `os.fchmod` and permission tests. Python 3.16 prerelease tests are also
+informational and run on the weekly schedule and manual dispatch. These jobs retain
+their failures without blocking `ci`; promote Windows once its compatibility gap
+is resolved. Update the stable matrix and prerelease version as Python releases advance.
+
+Packaging builds an sdist and then a wheel from it. The wheel is installed without
+dependencies into temporary environments outside the checkout on Python 3.9 and 3.15.
+`tests/package_smoke.py` checks the installed CLI, snapshot collection, reports,
+redacted baseline comparison, diff and failure exit codes using `tests/sample.conf`.
+Only the distributions and their SHA-256 checksums are uploaded, with seven-day retention.
+
+To prepare a release, create a `vVERSION` tag matching the package version,
+then manually run **CI** for that tag with **draft-release** enabled. After `ci`
+passes, the workflow creates a draft GitHub Release containing the exact tested
+distributions and checksums. A maintainer reviews and publishes the draft in GitHub.
+The workflow does not publish to PyPI. Ordinary CI jobs have read-only repository
+permissions; only the explicitly requested draft-release job receives release write access.
+
 ## License
 
 Copyright 2026 Pavel Simanovski
