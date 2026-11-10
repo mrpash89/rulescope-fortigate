@@ -15,10 +15,22 @@ from .safety import clean_tree, write_restricted
 
 
 def split_host_port(host: str, port: int) -> Tuple[str, int]:
+    """host, host:port, IPv6, [IPv6] or [IPv6]:port -> (host without brackets, port)."""
+    m = re.fullmatch(r"\[([^\]]+)\](?::(\d+))?", host)
+    if m:
+        return m.group(1), int(m.group(2)) if m.group(2) else port
     m = re.fullmatch(r"(.+):(\d+)", host)
     if m and host.count(":") == 1:
         return m.group(1), int(m.group(2))
     return host, port
+
+
+def write_private(path: str, text: str) -> None:
+    """Write a file that only the owner can read, with no window where it is readable by others."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # an existing file keeps its old mode on O_CREAT; tighten it before writing
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 
 def read_token(token_file: Optional[str] = None, token_env: Optional[str] = None,
@@ -73,7 +85,8 @@ def save_snapshot(snap: Dict[str, Any], base: str, name: Optional[str] = None) -
     d = device_dir(snap, base, name)
     os.makedirs(d, mode=0o700, exist_ok=True)
     while True:  # millisecond stamps keep names unique and in chronological sort order
-        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        # UTC, so names keep sorting chronologically when local clocks go back (DST)
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S-%f")[:-3]
         path = os.path.join(d, f"{stamp}.json")
         if not os.path.exists(path):
             break
@@ -92,7 +105,8 @@ def list_snapshots(directory: str) -> List[str]:
 
 def _stamp_epoch(path: str) -> Optional[float]:
     try:
-        return _dt.datetime.strptime(os.path.basename(path)[:15], "%Y%m%d-%H%M%S").timestamp()
+        return (_dt.datetime.strptime(os.path.basename(path)[:15], "%Y%m%d-%H%M%S")
+                .replace(tzinfo=_dt.timezone.utc).timestamp())
     except ValueError:
         return None
 
@@ -120,7 +134,7 @@ def prune(directory: str, keep_last: int = 48, keep_daily_days: int = 400) -> in
     files = list_snapshots(directory)
     keep = set(files[-keep_last:])
     seen_days = set()
-    now = _dt.datetime.now()
+    now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
     removed = 0
     for f in reversed(files):
         if f in keep:
