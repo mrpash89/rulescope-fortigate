@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from .safety import clean
+
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 SEV_LABEL = {"high": "High", "medium": "Medium", "low": "Low", "info": "Info"}
 
@@ -440,7 +442,7 @@ def finding(cid: str, *, policyid: Optional[int] = None, obj: Optional[str] = No
     sev, area, title, why, rec = CHECKS[cid]
     f = {"check": cid, "severity": severity or sev, "area": area, "category": AREAS[area][0],
          "title": title, "why": why, "recommendation": rec, "policyid": policyid, "uuid": None,
-         "object": obj, "detail": detail, "cli": cli or [], "cli_scope": cli_scope, "cli_safe": cli_safe,
+         "object": clean(obj), "detail": clean(detail), "cli": cli or [], "cli_scope": cli_scope, "cli_safe": cli_safe,
          "effort": EFFORT[cid]}
     if url:
         f["url"] = url
@@ -448,6 +450,8 @@ def finding(cid: str, *, policyid: Optional[int] = None, obj: Optional[str] = No
 
 
 def q(s: str) -> str:
+    """A quoted FortiOS CLI value. Control characters are removed first, so a name can never end the line."""
+    s = clean(str(s))
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 

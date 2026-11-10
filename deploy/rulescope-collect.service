@@ -7,8 +7,11 @@ After=network-online.target
 Type=oneshot
 User=rulescope
 Group=rulescope
-# Edit the host. Add --port, --vdom or --ca-file as needed.
-ExecStart=/usr/local/bin/rulescope collect --host 192.168.1.99 --token-file /etc/rulescope/token --insecure --out /var/lib/rulescope/snapshots --diff
+# Edit the host and the fingerprint (get it with: rulescope cert --host 192.168.1.99).
+# Use --ca-file instead of --pin-sha256 if the FortiGate has a certificate from your CA.
+# Alerts: put the webhook URL in /etc/rulescope/webhook (mode 600) and add --webhook-file /etc/rulescope/webhook.
+ExecStart=/usr/local/bin/rulescope collect --host 192.168.1.99 --token-file /etc/rulescope/token --pin-sha256 PASTE_FINGERPRINT_HERE --out /var/lib/rulescope/snapshots --diff
+UMask=0027
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

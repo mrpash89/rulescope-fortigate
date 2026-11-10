@@ -15,6 +15,7 @@ import datetime as _dt
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 import urllib.error
@@ -23,6 +24,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from .catalog import finding
+from .safety import clean_tree, safe_url
 
 LIFECYCLE_SOURCE = "https://support.fortinet.com/Information/ProductLifeCycle.aspx"
 LIFECYCLE_CHECKED = "2026-11-05"
@@ -42,6 +44,7 @@ EOES_SOON_DAYS = 180
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_SOURCE = "NIST National Vulnerability Database"
 _FGIR = re.compile(r"FG-IR-\d{2}-\d{2,4}", re.I)
+_CVE_ID = re.compile(r"CVE-\d{4}-\d{4,7}")
 
 
 def parse_version(v: Optional[str]) -> Optional[str]:
@@ -121,10 +124,24 @@ def normalize_cve(item: Dict[str, Any]) -> Dict[str, Any]:
     fgir = next((m.group(0).upper() for u in refs for m in [_FGIR.search(u)] if m), None)
     advisory = next((u for u in refs if _FGIR.search(u)), None)
     title = c.get("cisaVulnerabilityName") or (desc.split(". ")[0] if desc else c.get("id", ""))
-    return {"id": c.get("id", ""), "published": (c.get("published") or "")[:10], "cvss": score, "severity": sev,
-            "cvss_version": ver, "kev": bool(c.get("cisaExploitAdd")), "kev_added": c.get("cisaExploitAdd"),
-            "title": title[:180], "fgir": fgir,
-            "url": advisory or f"https://nvd.nist.gov/vuln/detail/{c.get('id', '')}"}
+    return sanitize_cve({"id": c.get("id", ""), "published": (c.get("published") or "")[:10], "cvss": score,
+                         "severity": sev, "cvss_version": ver, "kev": bool(c.get("cisaExploitAdd")),
+                         "kev_added": c.get("cisaExploitAdd"), "title": title[:180], "fgir": fgir, "url": advisory})
+
+
+def sanitize_cve(c: Dict[str, Any]) -> Dict[str, Any]:
+    """Applied to NVD data and to everything read back from the cache (which anyone could have edited)."""
+    c = clean_tree(dict(c))
+    cid = str(c.get("id") or "")
+    c["id"] = cid if _CVE_ID.fullmatch(cid) else "CVE-invalid"
+    try:
+        c["cvss"] = float(c["cvss"]) if c.get("cvss") is not None else None
+    except (TypeError, ValueError):
+        c["cvss"] = None
+    c["kev"] = bool(c.get("kev"))
+    c["title"] = str(c.get("title") or "")[:180]
+    c["url"] = safe_url(c.get("url")) or (f"https://nvd.nist.gov/vuln/detail/{c['id']}" if c["id"] != "CVE-invalid" else "")
+    return c
 
 
 class AdvisoryClient:
@@ -139,6 +156,12 @@ class AdvisoryClient:
         self.cache_dir = cache_dir or os.path.join(os.path.expanduser("~"), ".cache", "rulescope", "nvd")
         self.url = url or os.environ.get("RULESCOPE_NVD_URL") or NVD_URL
         self._mem: Dict[str, Dict[str, Any]] = {}
+        self._guard = threading.Lock()
+        self._locks: Dict[str, threading.Lock] = {}
+
+    def _version_lock(self, version: str) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(version, threading.Lock())
 
     def _cache_path(self, version: str) -> str:
         return os.path.join(self.cache_dir, f"fortios-{version}.json")
@@ -146,17 +169,27 @@ class AdvisoryClient:
     def _read_cache(self, version: str) -> Optional[Dict[str, Any]]:
         try:
             with open(self._cache_path(version), encoding="utf-8") as fh:
-                return json.load(fh)
+                data = json.load(fh)
         except (OSError, ValueError):
             return None
+        if not isinstance(data, dict) or not isinstance(data.get("cves"), list):
+            return None
+        data["cves"] = [sanitize_cve(c) for c in data["cves"] if isinstance(c, dict)]
+        data["fetched"] = str(data.get("fetched") or "")[:32] or None
+        return data
 
     def _write_cache(self, version: str, data: Dict[str, Any]) -> None:
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
-            tmp = self._cache_path(version) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(data, fh)
-            os.replace(tmp, self._cache_path(version))
+            fd, tmp = tempfile.mkstemp(dir=self.cache_dir, prefix=f".fortios-{version}-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh)
+                os.replace(tmp, self._cache_path(version))
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
         except OSError:
             pass  # a read-only cache folder must not fail the audit
 
@@ -198,6 +231,10 @@ class AdvisoryClient:
         if not version:
             res["error"] = "FortiOS version unknown"
             return res
+        with self._version_lock(version):  # fleet workers on the same version wait for one lookup
+            return self._lookup(version, res)
+
+    def _lookup(self, version: str, res: Dict[str, Any]) -> Dict[str, Any]:
         if version in self._mem:
             return self._mem[version]
         cached = self._read_cache(version)

@@ -7,9 +7,12 @@ import socket
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from .safety import clean
+
 
 def webhook(url: str, device: str, alerts: List[str], changes: int, report_link: Optional[str] = None,
             timeout: int = 10) -> None:
+    device, alerts = clean(device), [clean(a) for a in alerts]
     text = f"rulescope: {len(alerts)} risky change(s) on {device}\n" + "\n".join(f"- {a}" for a in alerts)
     if report_link:
         text += f"\n{report_link}"
@@ -20,19 +23,14 @@ def webhook(url: str, device: str, alerts: List[str], changes: int, report_link:
         r.read()
 
 
-def _one_line(s: str) -> str:
-    """Names come from the device: no line breaks or control characters in a syslog record."""
-    return "".join(c if c.isprintable() else " " for c in str(s)).replace('"', "'")
-
-
 def syslog(target: str, device: str, alerts: List[str]) -> None:
-    """RFC 5424 over UDP, facility local0, severity warning. target = host, host:port, IPv6 or [IPv6]:port."""
-    from .source import split_host_port
-    host, port = split_host_port(target, 514)
-    family, _, _, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
+    """RFC 5424 over UDP, facility local0, severity warning. target = host[:port]."""
+    host, _, port = target.partition(":")
     ts = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     me = socket.gethostname()
-    with socket.socket(family, socket.SOCK_DGRAM) as s:
+    device = clean(device).replace(" ", "_")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         for a in alerts:
-            msg = f"<132>1 {ts} {me} rulescope - change - device={_one_line(device)} alert=\"{_one_line(a)}\""
-            s.sendto(msg.encode()[:2048], addr)
+            a = clean(a).replace(chr(34), chr(39))  # one alert = one syslog line, no forged lines
+            msg = f"<132>1 {ts} {me} rulescope - change - device={device} alert=\"{a}\""
+            s.sendto(msg.encode()[:2048], (host, int(port or 514)))

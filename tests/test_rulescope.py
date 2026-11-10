@@ -48,7 +48,7 @@ class ParserTests(unittest.TestCase):
         root = fgtconf.parse(load_sample())
         msg = root.subs["system replacemsg mail email-block"].get("buffer")
         self.assertIn('"dangerous"', msg)
-        self.assertIn("\n", msg)
+        self.assertNotIn("\n", msg)  # line breaks inside values are flattened: config text is untrusted
         self.assertIn("10", root.sub("firewall policy").entries)
 
     def test_header(self):
@@ -468,8 +468,9 @@ class InventoryTests(unittest.TestCase):
         devs = fleet.load_inventory(os.path.join(os.path.dirname(HERE), "examples", "fleet.ini.example"))
         by = {d["name"]: d for d in devs}
         self.assertEqual(set(by), {"HQ-FW", "Branch-North", "Customer-X-offline"})
-        self.assertTrue(by["HQ-FW"]["insecure"])                       # inline '; comment' stripped
-        self.assertEqual(by["Branch-North"]["host"], "192.0.2.21:8443")
+        self.assertFalse(by["HQ-FW"]["insecure"])                      # certificate checks stay on by default
+        self.assertEqual(by["HQ-FW"]["pin_sha256"], "PASTE_FINGERPRINT_FROM_rulescope_cert")
+        self.assertEqual(by["Branch-North"]["host"], "192.0.2.21:8443")              # inline '; comment' stripped
         self.assertEqual(by["Branch-North"]["token_env"], "BRANCH_TOKEN")
         self.assertEqual(by["Customer-X-offline"]["usage_since"], "2026-08-01")
         self.assertEqual(by["HQ-FW"]["not_wan"], "port10, QinQ-V10")
@@ -812,6 +813,224 @@ class PaletteTests(unittest.TestCase):
             '<!doctype html><html lang="en" data-palette="harbor">'))
         dash = fleet.dashboard({"generated": "now", "devices": [], "lifecycle": []}, "forest")
         self.assertIn('data-palette="forest"', dash)
+
+
+# ---------------------------------------------------------------- 0.4.1: hostile input
+
+HOSTILE_NAME = "x\nend\nexecute factoryreset\nconfig firewall address"
+
+
+def hostile_config():
+    """The sample config with crafted names, comments and hostname, as a malicious client could send."""
+    cfg = load_sample()
+    esc_name = HOSTILE_NAME.replace('"', '\\"')
+    cfg = cfg.replace("config firewall address\n", f'config firewall address\n    edit "{esc_name}"\n'
+                      '        set subnet 10.9.9.9 255.255.255.255\n    next\n'
+                      '    edit "=HYPERLINK(""http://evil.example"",""x"")"\n'
+                      '        set subnet 10.9.9.8 255.255.255.255\n    next\n', 1)
+    cfg = cfg.replace('set hostname "FGT-LAB"', 'set hostname "..\x1b[2J\x1b]0;pwned\x07"')
+    i = cfg.index("    edit 11\n", cfg.index("config firewall policy"))
+    j = cfg.index("    next\n", i)
+    return cfg[:j] + '        set comments "old\nexecute shutdown\nconfig system global"\n' + cfg[j:]
+
+
+class HostileInputTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.snap = model.from_config(hostile_config())
+        cls.res = checks.analyze(cls.snap)
+
+    def test_no_control_characters_survive_parsing(self):
+        dump = json.dumps(self.snap, ensure_ascii=False)
+        for ch in ("\\n", "\\u001b", "\\u0007"):
+            self.assertNotIn(ch, dump)
+        self.assertIn("x end execute factoryreset config firewall address", self.snap["addresses"])
+
+    def test_remediation_script_cannot_be_injected(self):
+        cli_txt = report.remediation_cli(self.res)
+        for ln in cli_txt.splitlines():
+            if ln.strip() and not ln.lstrip().startswith("#"):
+                self.assertRegex(ln, r"^\s*(config|edit|set|unset|append|next|end|move|delete)(\s|$)", ln)
+        self.assertNotRegex(cli_txt, r"(?m)^\s*execute")
+        self.assertIn('delete "x end execute factoryreset config firewall address"', cli_txt)
+        self.assertIn("old execute shutdown config system global", cli_txt)   # comment kept on one line
+        # the last line of defense blocks anything that is not a generated statement
+        guarded = report.guard_script("config firewall policy\n    edit 1\nexecute factoryreset\nend\n")
+        self.assertIn("# BLOCKED, unexpected statement: execute factoryreset", guarded)
+        self.assertTrue(guarded.startswith("# WARNING: 1 unexpected line"))
+
+    def test_csv_formula_and_terminal(self):
+        csv_txt = report.findings_csv(self.res)
+        self.assertIn("'=HYPERLINK", csv_txt)
+        self.assertNotRegex(csv_txt, r"(^|,)=HYPERLINK")
+        self.assertNotIn("\x1b", report.console_summary(self.res))
+        self.assertNotIn("\x1b", report.practices_csv(self.res))
+
+    def test_api_data_and_loaded_files_are_cleaned(self):
+        snap = model.from_api({"status": {"results": {"hostname": "fw\nevil", "version": "v7.4.3"}},
+                               "policy": {"results": [{"policyid": 1, "name": "a\nexecute x", "srcintf": [{"name": "p1"}],
+                                                       "dstintf": [{"name": "p2"}], "srcaddr": [{"name": "all"}],
+                                                       "dstaddr": [{"name": "all"}], "service": [{"name": "ALL"}],
+                                                       "action": "accept", "status": "enable"}]}})
+        self.assertEqual(snap["device"]["hostname"], "fw evil")
+        self.assertEqual(snap["policies"][0]["name"], "a execute x")
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "s.json")
+            raw = json.loads(json.dumps(model.from_config(load_sample())))
+            raw["device"]["hostname"] = "bad\nname\x1b"
+            with open(p, "w") as fh:
+                json.dump(raw, fh)
+            self.assertEqual(source.load_snapshot(p)["device"]["hostname"], "bad name?")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_paths_stay_inside_and_files_are_private(self):
+        for bad in ("..", ".", "../../etc", "...x", "/abs/path", ""):
+            n = source.safe_name(bad)
+            self.assertFalse(n.startswith("."), bad)
+            self.assertNotIn("/", n)
+        tmp = tempfile.mkdtemp()
+        try:
+            base = os.path.join(tmp, "snaps")
+            path = source.save_snapshot(self.snap, base)       # hostname starts with ".."
+            self.assertTrue(os.path.realpath(path).startswith(os.path.realpath(base) + os.sep))
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            out = os.path.join(tmp, "r.html")
+            with redirect_stdout(io.StringIO()):
+                cli.main(["audit", "--config", os.path.join(HERE, "sample.conf"), "--html", out,
+                          "--cli", os.path.join(tmp, "fix.txt"), "--advisories", "off"])
+            for f in ("r.html", "fix.txt"):
+                self.assertEqual(os.stat(os.path.join(tmp, f)).st_mode & 0o007, 0, f)
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_change_log_secrets_masked(self):
+        from rulescope.api import normalize_event
+        e = normalize_event({"cfgattr": "auth-pwd[abc]priv-pwd[def]passphrase[wifi123]name[x]", "msg": "psksecret[zz]"})
+        self.assertNotIn("abc", e["cfgattr"])
+        self.assertNotIn("def", e["cfgattr"])
+        self.assertNotIn("wifi123", e["cfgattr"])
+        self.assertIn("name[x]", e["cfgattr"])
+
+    def test_report_links_https_only(self):
+        from rulescope.safety import safe_url
+        self.assertEqual(safe_url("javascript:alert(1)"), "")
+        self.assertEqual(safe_url("https://fortiguard.com/psirt/FG-IR-24-015"), "https://fortiguard.com/psirt/FG-IR-24-015")
+        c = firmware.sanitize_cve({"id": "CVE-2099-0001", "url": "javascript:alert(1)", "title": "t\nx", "cvss": "9.8"})
+        self.assertEqual(c["url"], "https://nvd.nist.gov/vuln/detail/CVE-2099-0001")
+        self.assertEqual((c["title"], c["cvss"]), ("t x", 9.8))
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp, "fortios-7.4.3.json"), "w") as fh:
+                json.dump({"fetched": "2099-01-01T00:00:00+00:00", "cves": [
+                    {"id": "CVE-2099-0005\"><script>", "url": "javascript:alert(1)", "kev": True, "cvss": 9.9}]}, fh)
+            adv = firmware.AdvisoryClient(mode="cache", cache_dir=tmp).lookup("7.4.3")
+            html = report.html_report(checks.analyze(self.snap, advisories=adv), self.snap)
+            self.assertNotIn("javascript:", html)
+            self.assertNotIn("<script>alert", html)
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_syslog_one_line_per_alert(self):
+        import socket
+        from rulescope import notify
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.bind(("127.0.0.1", 0))
+        rx.settimeout(2)
+        try:
+            notify.syslog(f"127.0.0.1:{rx.getsockname()[1]}", "fw\nx", ["Policy a\n<132>1 forged line"])
+            msg = rx.recv(4096).decode()
+            self.assertNotIn("\n", msg)
+            self.assertIn("forged line", msg)
+        finally:
+            rx.close()
+
+    def test_webhook_url_from_file_or_env(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "hook")
+            with open(p, "w") as fh:
+                fh.write("https://hooks.example/abc\n")
+            import argparse
+            self.assertEqual(cli._webhook(argparse.Namespace(webhook_file=p, webhook=None)), "https://hooks.example/abc")
+            os.environ["RULESCOPE_WEBHOOK"] = "https://hooks.example/env"
+            try:
+                self.assertEqual(cli._webhook(argparse.Namespace(webhook_file=None, webhook=None)), "https://hooks.example/env")
+            finally:
+                del os.environ["RULESCOPE_WEBHOOK"]
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_nvd_lookup_once_per_version_under_concurrency(self):
+        NvdHandler.calls = []
+        srv = HTTPServer(("127.0.0.1", 0), NvdHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        tmp = tempfile.mkdtemp()
+        try:
+            client = firmware.AdvisoryClient(mode="online", cache_dir=tmp, api_key="k",
+                                             url=f"http://127.0.0.1:{srv.server_address[1]}/rest/json/cves/2.0")
+            results = []
+            ts = [threading.Thread(target=lambda: results.append(client.lookup("7.4.3"))) for _ in range(6)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            self.assertEqual(len(NvdHandler.calls), 2)          # one lookup (two pages), not six
+            self.assertTrue(all(len(r["cves"]) == 3 for r in results))
+            self.assertEqual([f for f in os.listdir(tmp) if f.endswith(".tmp")], [])
+        finally:
+            srv.shutdown()
+            shutil.rmtree(tmp)
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
+class PinningTests(unittest.TestCase):
+    def test_pin_accepts_only_that_certificate(self):
+        import ssl
+        import subprocess
+        from rulescope.api import CertificatePinError, FortiGateAPI, cert_fingerprint
+        tmp = tempfile.mkdtemp()
+        try:
+            key, crt = os.path.join(tmp, "k.pem"), os.path.join(tmp, "c.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt,
+                            "-days", "2", "-subj", "/CN=fgt-test"], check=True, capture_output=True)
+            seen = []
+
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    seen.append(self.headers.get("Authorization"))
+                    body = b'{"results": {"hostname": "fgt"}}'
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *a):
+                    pass
+            srv = HTTPServer(("127.0.0.1", 0), H)
+            srv.handle_error = lambda *a: None  # the refused client closes the connection on purpose
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(crt, key)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            port = srv.server_address[1]
+            try:
+                fp = cert_fingerprint("127.0.0.1", port)
+                ok = FortiGateAPI("127.0.0.1", "tok", port=port, pin_sha256=":".join(fp[i:i + 2] for i in range(0, 64, 2)))
+                self.assertEqual(ok.get("monitor/system/status", vdom_scoped=False)["results"]["hostname"], "fgt")
+                self.assertEqual(seen, ["Bearer tok"])
+                bad = FortiGateAPI("127.0.0.1", "secret", port=port, pin_sha256="0" * 64)
+                with self.assertRaises(CertificatePinError):
+                    bad.get("monitor/system/status", vdom_scoped=False)
+                self.assertEqual(seen, ["Bearer tok"])          # the token was never sent to the wrong certificate
+                strict = FortiGateAPI("127.0.0.1", "secret", port=port)  # default: CA verification, self-signed fails
+                with self.assertRaises(ConnectionError):
+                    strict.get("monitor/system/status", vdom_scoped=False)
+            finally:
+                srv.shutdown()
+        finally:
+            shutil.rmtree(tmp)
 
 
 # ---------------------------------------------------------------- fake FortiGate REST API

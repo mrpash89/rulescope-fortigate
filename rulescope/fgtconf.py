@@ -11,6 +11,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from .safety import clean
+
 _TOKEN_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|([^\s"]+)|(\n)', re.DOTALL)
 _UNESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
 _HEADER_RE = re.compile(r"#config-version=([A-Za-z0-9]+)-(\d+\.\d+\.\d+)-FW-build(\d+)")
@@ -46,9 +48,10 @@ def _statements(text: str) -> Iterator[List[str]]:
             if not stmt and bare.startswith("#"):
                 skip = True
                 continue
-            stmt.append(bare)
+            stmt.append(clean(bare))
         else:
-            stmt.append(_UNESCAPE_RE.sub(r"\1", quoted))
+            # values from an untrusted file: no line breaks or control characters survive parsing
+            stmt.append(clean(_UNESCAPE_RE.sub(r"\1", quoted)))
     if stmt and not skip:
         yield stmt
 

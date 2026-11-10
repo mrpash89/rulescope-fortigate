@@ -1,8 +1,9 @@
 """Command-line entry point.
 
-  rulescope audit   --host 192.168.1.99 --token-file ~/.rulescope-token --insecure --html report.html
+  rulescope cert    --host 192.168.1.99      (certificate fingerprint for --pin-sha256)
+  rulescope audit   --host 192.168.1.99 --token-file ~/.rulescope-token --pin-sha256 <fp> --html report.html
   rulescope audit   --config backup.conf --usage hits.csv --html report.html --csv findings.csv
-  rulescope collect --host 192.168.1.99 --token-file ~/.rulescope-token --insecure --diff
+  rulescope collect --host 192.168.1.99 --token-file ~/.rulescope-token --pin-sha256 <fp> --diff
   rulescope analyze snapshots/FGT/20261031-230000.json --baseline snapshots/FGT/20261001-230000.json --html r.html
   rulescope diff    --dir snapshots/FGT --html changes.html
   rulescope fleet   --inventory fleet.ini --out /var/www/rulescope --snapshots /var/lib/rulescope/snapshots
@@ -18,9 +19,10 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from . import __version__, checks, diff, firmware, fleet, notify, report, source
-from .api import ApiError
+from .api import ApiError, cert_fingerprint
 from .catalog import SEVERITY_ORDER
 from .redact import redact
+from .safety import clean_tree, write_restricted
 from .ui import PALETTES
 
 
@@ -31,9 +33,13 @@ def _snapshot_from_args(args: argparse.Namespace) -> Dict[str, Any]:
             print("warning: --token leaves the token in shell history; prefer --token-file or RULESCOPE_TOKEN.",
                   file=sys.stderr)
         token = source.read_token(args.token_file, None, args.token)
+        if args.insecure and not args.pin_sha256:
+            print("warning: --insecure disables certificate checks; anyone on the network path can capture the API "
+                  "token. Use --pin-sha256 (get it with: rulescope cert --host ...) or --ca-file.", file=sys.stderr)
     try:
         return source.take_snapshot(host=args.host, config=getattr(args, "config", None), port=args.port,
                                     vdom=args.vdom, token=token, insecure=args.insecure, ca_file=args.ca_file,
+                                    pin_sha256=args.pin_sha256,
                                     timeout=args.timeout, with_backup=not args.no_backup,
                                     with_events=not args.no_events, usage=getattr(args, "usage", None),
                                     usage_since=getattr(args, "usage_since", None))
@@ -95,14 +101,26 @@ def _add_firmware(p: argparse.ArgumentParser) -> None:
 
 
 def _write(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    """Reports describe a firewall's weaknesses: never readable by other users on this machine."""
+    write_restricted(path, text)
     print(f"wrote {path}")
 
 
 def _load_json(path: str) -> Dict[str, Any]:
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        return clean_tree(json.load(fh))
+
+
+def _webhook(args: argparse.Namespace) -> Optional[str]:
+    """Webhook URLs are secrets: prefer a file or RULESCOPE_WEBHOOK over the command line (visible in ps)."""
+    if getattr(args, "webhook_file", None):
+        with open(args.webhook_file, encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    if getattr(args, "webhook", None):
+        print("warning: --webhook shows the URL in the process list; prefer --webhook-file or RULESCOPE_WEBHOOK.",
+              file=sys.stderr)
+        return args.webhook
+    return os.environ.get("RULESCOPE_WEBHOOK") or None
 
 
 def _outputs(snap: Dict[str, Any], args: argparse.Namespace) -> int:
@@ -120,7 +138,7 @@ def _outputs(snap: Dict[str, Any], args: argparse.Namespace) -> int:
             baseline, _ = redact(baseline)
         redacted = True
         if args.redact_map:
-            source.write_private(args.redact_map, json.dumps(mapping, indent=1, ensure_ascii=False))
+            write_restricted(args.redact_map, json.dumps(mapping, indent=1, ensure_ascii=False), 0o600)
             print(f"wrote {args.redact_map}")
     adv_client = _advisor(args)
     adv = adv_client.lookup(snap["device"].get("version")) if adv_client else None
@@ -155,8 +173,11 @@ def _add_source(p: argparse.ArgumentParser, allow_config: bool = True) -> None:
     g.add_argument("--vdom", default="root")
     g.add_argument("--token-file", help="File containing the REST API token")
     g.add_argument("--token", help="API token (prefer --token-file or RULESCOPE_TOKEN)")
-    g.add_argument("--insecure", action="store_true", help="Skip TLS verification (self-signed certificate)")
+    g.add_argument("--pin-sha256", help="Accept only the certificate with this SHA-256 fingerprint (self-signed "
+                                        "FortiGate certificates; get it with: rulescope cert --host ...)")
     g.add_argument("--ca-file", help="CA bundle to verify the FortiGate certificate")
+    g.add_argument("--insecure", action="store_true",
+                   help="Skip TLS verification entirely (lab only: the token can be captured on the network)")
     g.add_argument("--timeout", type=int, default=30)
     g.add_argument("--no-backup", action="store_true", help="Do not read the config backup for reference counts")
     g.add_argument("--no-events", action="store_true", help="Do not read config-change events from the log")
@@ -206,7 +227,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_wan(c)
     c.add_argument("--out", default="snapshots", help="Snapshot directory (default: ./snapshots)")
     c.add_argument("--diff", action="store_true", help="Print changes since the previous snapshot")
-    c.add_argument("--webhook", help="POST risky-change alerts to this URL")
+    c.add_argument("--webhook", help="POST risky-change alerts to this URL (visible in ps: prefer --webhook-file)")
+    c.add_argument("--webhook-file", help="File containing the webhook URL (or set RULESCOPE_WEBHOOK)")
     c.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
 
     n = sub.add_parser("analyze", help="Analyze a saved snapshot")
@@ -232,10 +254,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     f.add_argument("--stale-days", type=int, default=90)
     f.add_argument("--baseline-days", type=int, default=30, help="Compare each report with a snapshot this old")
     f.add_argument("--auditor", default="")
-    f.add_argument("--webhook", help="POST risky-change alerts to this URL")
+    f.add_argument("--webhook", help="POST risky-change alerts to this URL (visible in ps: prefer --webhook-file)")
+    f.add_argument("--webhook-file", help="File containing the webhook URL (or set RULESCOPE_WEBHOOK)")
     f.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
     f.add_argument("--palette", choices=list(PALETTES), default="harbor", help="Default color palette of the pages")
     _add_firmware(f)
+
+    ce = sub.add_parser("cert", help="Show the SHA-256 fingerprint of a FortiGate's certificate, for --pin-sha256")
+    ce.add_argument("--host", required=True, help="FortiGate address, optionally host:port")
+    ce.add_argument("--port", type=int, default=443)
+    ce.add_argument("--timeout", type=int, default=10)
 
     fw = sub.add_parser("firmware", help="Lifecycle and known vulnerabilities of FortiOS versions (fills the advisory cache)")
     fw.add_argument("versions", nargs="+", help="FortiOS versions, e.g. 7.4.3 7.2.10")
@@ -258,7 +286,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         path = source.save_snapshot(snap, args.out)
         print(f"snapshot {path}")
         files = source.list_snapshots(os.path.dirname(path))
-        if args.diff or args.webhook or args.syslog:
+        hook = _webhook(args)
+        if args.diff or hook or args.syslog:
             if len(files) < 2:
                 print("no previous snapshot to compare")
                 return 0
@@ -266,8 +295,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.diff:
                 print(diff.render_text(res))
             dev = snap["device"].get("hostname") or "fortigate"
-            if res["alerts"] and args.webhook:
-                notify.webhook(args.webhook, dev, res["alerts"], len(res["objects"]) + sum(map(len, res["policies"].values())))
+            if res["alerts"] and hook:
+                notify.webhook(hook, dev, res["alerts"], len(res["objects"]) + sum(map(len, res["policies"].values())))
             if res["alerts"] and args.syslog:
                 notify.syslog(args.syslog, dev, res["alerts"])
         return 0
@@ -305,7 +334,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError) as e:
             raise SystemExit(f"inventory: {e}")
         summary = fleet.run(devices, args.out, args.snapshots, workers=args.workers, stale_days=args.stale_days,
-                            baseline_days=args.baseline_days, auditor=args.auditor, webhook=args.webhook,
+                            baseline_days=args.baseline_days, auditor=args.auditor, webhook=_webhook(args),
                             syslog_target=args.syslog, advisor=_advisor(args), lifecycle=_lifecycle(args),
                             palette=args.palette)
         for r in summary["devices"]:
@@ -316,6 +345,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"{r['name']:24} ERROR {r.get('error')}")
         print(f"wrote {os.path.join(args.out, 'index.html')}")
         return 3 if any(r["status"] != "ok" for r in summary["devices"]) else 0
+
+    if args.cmd == "cert":
+        h, p = source.split_host_port(args.host, args.port)
+        try:
+            fp = cert_fingerprint(h, p, args.timeout)
+        except OSError as e:
+            raise SystemExit(f"Cannot reach {h}:{p}: {e}")
+        print(f"SHA-256 fingerprint of the certificate at {h}:{p}:\n{fp}\n")
+        print("Check it before trusting it: run this from a network path you trust (for example the management VLAN),")
+        print("or compare with: openssl s_client -connect HOST:PORT </dev/null | openssl x509 -noout -fingerprint -sha256")
+        print(f"Then use: --pin-sha256 {fp}")
+        return 0
 
     if args.cmd == "firmware":
         client = _advisor(args)

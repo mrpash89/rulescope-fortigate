@@ -5,11 +5,15 @@
 
 [DEFAULT]
 token_file = /etc/rulescope/token
-insecure = yes          ; self-signed admin certificate (use ca_file = ... once you have a proper CA)
 timeout = 30
+; Certificate check, one of:
+;   pin_sha256 = <fingerprint>   per device, for the self-signed FortiGate certificate (rulescope cert --host ...)
+;   ca_file = /etc/rulescope/ca.pem   when the FortiGates have certificates from your CA
+;   insecure = yes   lab only: anyone on the network path can capture the token
 
 [HQ-FW]
 host = 192.0.2.1
+pin_sha256 = PASTE_FINGERPRINT_FROM_rulescope_cert
 label = Headquarters
 group = Core
 vdom = root
@@ -17,6 +21,7 @@ not_wan = port10, QinQ-V10 ; default route points to an upstream internal networ
 
 [Branch-North]
 host = 192.0.2.21:8443  ; admin HTTPS on a non-default port
+pin_sha256 = PASTE_FINGERPRINT_FROM_rulescope_cert
 label = Branch North
 group = Branches
 token_env = BRANCH_TOKEN ; token from an environment variable instead of the default file

@@ -43,7 +43,7 @@ python3 -m pip install .          # or: pipx install .
 rulescope --version
 ```
 
-No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.0.pyz ...`.
+No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.1.pyz ...`.
 
 ## 1. Read-only API user on the FortiGate
 
@@ -86,10 +86,11 @@ install -m 600 /dev/null ~/.rulescope-token && nano ~/.rulescope-token
 
 ## 2. Audit one firewall
 
-Live (hit counters, change log):
+Live (hit counters, change log). The FortiGate's admin certificate is usually self-signed, so pin it: rulescope then talks only to the device with exactly that certificate and never sends the token anywhere else.
 
 ```bash
-rulescope audit --host 192.0.2.1 --token-file ~/.rulescope-token --insecure \
+rulescope cert --host 192.0.2.1                 # prints the SHA-256 fingerprint; run it from a network path you trust
+rulescope audit --host 192.0.2.1 --token-file ~/.rulescope-token --pin-sha256 <fingerprint> \
   --client "Home lab" --auditor "Your Name" \
   --html report.html --cli fix.txt --csv findings.csv --save-snapshot snapshots
 ```
@@ -112,7 +113,8 @@ Useful options:
 | `--palette forest` | Default palette of the report: `harbor`, `forest`, `ocean`, `graphite`, `contrast`. Readers can still switch it, and light/dark. |
 | `--practices-csv baseline.csv` | The best-practice baseline as a spreadsheet with owner and target-date columns |
 | `--fail-on high` | Exit code 2 when anything at that severity or above is found (cron/CI) |
-| `--host 192.0.2.1:8443`, `--vdom DMZ`, `--ca-file` | Non-default admin port, other VDOM, proper certificate verification |
+| `--host 192.0.2.1:8443`, `--vdom DMZ` | Non-default admin port, other VDOM |
+| `--pin-sha256 FP` / `--ca-file ca.pem` | Certificate check: pin the self-signed certificate, or verify against your CA. `--insecure` turns checks off and is for a lab only, because anyone on the path could capture the token. |
 
 ## 3. Usage data that survives reboots
 
@@ -192,7 +194,7 @@ Every run compares each device with its previous snapshot. These changes raise a
 - Password policy, NTP, scheduled FortiGuard updates or private data encryption disabled; USB auto-install enabled
 - SSL-VPN settings changed
 
-Send alerts anywhere with `--webhook URL` (JSON with a `text` field, which Slack, Mattermost and workflow-style webhooks accept) and/or `--syslog host:514` (RFC 5424, so the SIEM can alert too). Single device: `rulescope collect ... --diff --webhook URL`.
+Send alerts anywhere with a webhook (JSON with a `text` field, which Slack, Mattermost and workflow-style webhooks accept) and/or `--syslog host:514` (RFC 5424, so the SIEM can alert too). Webhook URLs are secrets, so keep them out of the command line: `--webhook-file /etc/rulescope/webhook` (mode 600) or the `RULESCOPE_WEBHOOK` environment variable. Single device: `rulescope collect ... --diff --webhook-file /etc/rulescope/webhook`.
 
 With API access, each change shows who made it (user, GUI/CLI/API and source IP, time), taken from the FortiGate's system event log. Values of password, PSK and key attributes are masked before anything is stored.
 
@@ -226,7 +228,19 @@ For the follow-up audit, add `--baseline` with the first snapshot: the report th
 
 The API token is read-only and restricted to one source IP by trusted hosts. Snapshots never contain the raw config, password hashes, PSKs or keys, and are written with mode 600. Reports and dashboards are sensitive: they list weaknesses.
 
-## Limits (v0.4)
+## Security of rulescope itself
+
+Configs you audit may come from anyone, so rulescope treats every name, comment and value in them as hostile:
+
+- **Remediation scripts.** Control characters and line breaks are removed from all config text when it is read, every risky line is commented out line by line, and a final check blocks any script line that is not one of the statements rulescope generates (`config`, `edit`, `set`, `unset`, `append`, `next`, `end`, `move`, `delete`). Blocked lines are marked at the top of the script. Still read every line before you paste it.
+- **CSV files** prefix cells that start with `=`, `+`, `-` or `@` so spreadsheets never run them as formulas.
+- **Reports and terminal output** escape or strip markup and terminal control codes; report links must be `https://`.
+- **Files.** Snapshots are written readable only by the owner; reports and fleet pages never for other users (group-readable, for a web server). Device names never escape the output folder.
+- **The API token** is sent only after the certificate check passes (pin or CA). Use a read-only profile and trusted hosts as in section 1.
+
+Found a security problem? Report it privately to the maintainer rather than in a public issue.
+
+## Limits (v0.4.1)
 
 - IPv4 coverage math; IPv6 addresses in unified policies are compared by name.
 - Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet.

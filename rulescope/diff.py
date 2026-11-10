@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import exposure, model
 from .resolve import Resolver
+from .safety import clean_multiline
 
 POLICY_IGNORE = {"policyid"}
 # snapshot key, label, fields compared (None = all), FortiOS cfgpath used in change logs
@@ -240,7 +241,7 @@ def render_text(d: Dict[str, Any]) -> str:
         out.append(f"  FortiOS: {d['old']['version']} -> {d['new']['version']}")
     if d["empty"]:
         out.append("  No changes.")
-        return "\n".join(out)
+        return clean_multiline("\n".join(out))
     for a in d.get("alerts", []):
         out.append(f"  ! {a}")
     att = d.get("attribution", {})
@@ -270,7 +271,7 @@ def render_text(d: Dict[str, Any]) -> str:
         for f, a, b in o["changes"]:
             out.append(f"      {f}: {_fmt(a)} -> {_fmt(b)}")
         by(f"{o['type']}:{o['name']}")
-    return "\n".join(out)
+    return clean_multiline("\n".join(out))
 
 
 def render_html(d: Dict[str, Any], palette: str = "harbor") -> str:

@@ -9,6 +9,7 @@ from . import __version__
 from .catalog import AREAS, CHECKS, CONTROL_NAMES, EFFORT, EFFORT_LABEL, SEV_LABEL, SEVERITY_ORDER
 from .practices import DOMAINS, SOURCES, STATUS_LABEL
 from .report import _e, _grouped, _target, _ts, _worst, executive_summary, internet_services, remediation_cli
+from .safety import safe_url
 from .ui import AREA_VAR, CONTROLS, CSS, LOGO, THEME_HEAD, THEME_JS, html_open
 
 SEVS = ("high", "medium", "low", "info")
@@ -375,7 +376,8 @@ def _firmware(result: Dict[str, Any]) -> str:
             fgir = f'<div class="dim">{_e(cv["fgir"])}</div>' if cv.get("fgir") else ""
             kev = '<span class="pill high">Exploited</span>' if cv.get("kev") else ""
             sc_txt = "" if score is None else f"{score:g}"
-            rows.append(f'<tr><td class="mono" style="white-space:nowrap"><a href="{_e(cv.get("url"))}" target="_blank" '
+            href = safe_url(cv.get("url")) or f"https://nvd.nist.gov/vuln/detail/{_e(cv.get('id', ''))}"
+            rows.append(f'<tr><td class="mono" style="white-space:nowrap"><a href="{_e(href)}" target="_blank" '
                         f'rel="noopener">{_e(cv["id"])}</a>{fgir}</td><td>{_pill(sev)} <b>{sc_txt}</b></td><td>{kev}</td>'
                         f'<td class="mono">{_e(cv.get("published"))}</td><td>{_e(cv.get("title"))}</td></tr>')
         more = f'<p class="dim" style="font-size:13px">{len(cves) - 60} more in findings.json.</p>' if len(cves) > 60 else ""
@@ -449,7 +451,7 @@ def _findings(result: Dict[str, Any]) -> str:
             for f in items:
                 sev_mark = _pill(f["severity"]) + " " if f["severity"] != worst else ""
                 text = f"{_target(f)} {f['detail']}".lower()
-                tgt = (f'<a href="{_e(f["url"])}" target="_blank" rel="noopener">{_e(_target(f))}</a>' if f.get("url")
+                tgt = (f'<a href="{_e(safe_url(f["url"]))}" target="_blank" rel="noopener">{_e(_target(f))}</a>' if safe_url(f.get("url"))
                        and f["policyid"] is None else _e(_target(f)))
                 rows.append(f'<tr data-sev="{f["severity"]}" data-text="{_e(text)}"><td class="id">{sev_mark}{tgt}</td>'
                             f'<td>{_e(f["detail"])}</td></tr>')

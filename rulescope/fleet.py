@@ -4,10 +4,13 @@ Inventory (INI). Values in [DEFAULT] apply to every device; vdom may list severa
 
     [DEFAULT]
     token_file = /etc/rulescope/token
-    insecure = yes
 
     [HQ-FW]
     host = 192.0.2.1
+    pin_sha256 = 3f5c...e1a0     ; fingerprint from: rulescope cert --host 192.0.2.1
+
+    [HQ-FW2]
+    host = 192.0.2.2
     vdom = root, DMZ
     label = Headquarters
 
@@ -25,6 +28,7 @@ import configparser
 import datetime as _dt
 import json
 import os
+import sys
 import traceback
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +37,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__, checks, diff, firmware, notify, report, source
 from .catalog import CHECKS, SEV_LABEL, SEVERITY_ORDER
+from .safety import makedirs_restricted, write_restricted
 from .ui import CONTROLS, THEME_HEAD, THEME_JS, html_open
 
 TRUE = {"1", "yes", "true", "on"}
@@ -52,6 +57,7 @@ def load_inventory(path: str) -> List[Dict[str, Any]]:
                 "host": o.get("host"), "config": o.get("config"), "port": int(o.get("port", "443")),
                 "token_file": o.get("token_file"), "token_env": o.get("token_env"),
                 "insecure": o.get("insecure", "no").lower() in TRUE, "ca_file": o.get("ca_file"),
+                "pin_sha256": o.get("pin_sha256"),
                 "timeout": int(o.get("timeout", "30")), "usage": o.get("usage"), "usage_since": o.get("usage_since"),
                 "label": o.get("label", sec), "group": o.get("group", ""),
                 "backup": o.get("backup", "yes").lower() in TRUE, "events": o.get("events", "yes").lower() in TRUE,
@@ -77,14 +83,12 @@ def _history(path: str, entry: Dict[str, Any], keep: int = 400) -> List[Dict[str
             hist = []
     hist.append(entry)
     hist = hist[-keep:]
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(hist, fh)
+    write_restricted(path, json.dumps(hist))
     return hist
 
 
 def _write(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    write_restricted(path, text)  # group-readable for the web server, never world-readable
 
 
 def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: int = 90, baseline_days: int = 30,
@@ -100,6 +104,7 @@ def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: i
             token = source.read_token(dev.get("token_file"), dev.get("token_env"))
         snap = source.take_snapshot(host=dev.get("host"), config=dev.get("config"), port=dev["port"], vdom=dev["vdom"],
                                     token=token, insecure=dev["insecure"], ca_file=dev.get("ca_file"),
+                                    pin_sha256=dev.get("pin_sha256"),
                                     timeout=dev["timeout"], with_backup=dev.get("backup", True),
                                     with_events=dev.get("events", True), usage=dev.get("usage"),
                                     usage_since=dev.get("usage_since"))
@@ -117,7 +122,7 @@ def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: i
         res = checks.analyze(snap, stale_days=stale_days, baseline=baseline, advisories=adv, lifecycle_table=lifecycle)
 
         ddir = os.path.join(out_dir, source.safe_name(dev["name"]))
-        os.makedirs(ddir, exist_ok=True)
+        makedirs_restricted(ddir)
         _write(os.path.join(ddir, "report.html"), report.html_report(res, snap, client=row["label"], auditor=auditor,
                                                                      palette=palette))
         _write(os.path.join(ddir, "findings.json"), json.dumps(res, indent=1))
@@ -172,7 +177,11 @@ def run(devices: List[Dict[str, Any]], out_dir: str, snap_dir: str, workers: int
         baseline_days: int = 30, auditor: str = "", webhook: Optional[str] = None,
         syslog_target: Optional[str] = None, advisor: Optional[firmware.AdvisoryClient] = None,
         lifecycle: Optional[Dict[str, Any]] = None, palette: str = "harbor") -> Dict[str, Any]:
-    os.makedirs(out_dir, exist_ok=True)
+    makedirs_restricted(out_dir)
+    for d in devices:
+        if d.get("host") and d.get("insecure") and not d.get("pin_sha256"):
+            print(f"warning: [{d['name']}] insecure = yes disables certificate checks; the API token can be captured "
+                  "on the network. Set pin_sha256 (rulescope cert --host ...).", file=sys.stderr)
 
     def notifier(device: str, alerts: List[str], changes: int) -> None:
         if webhook:

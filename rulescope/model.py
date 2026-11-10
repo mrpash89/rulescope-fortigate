@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import fgtconf
+from .safety import clean_tree
 
 SCHEMA = 3
 
@@ -596,6 +597,7 @@ def from_config(text: str, vdom: str = "root") -> Dict[str, Any]:
 
 def from_api(data: Dict[str, Any], vdom: str = "root") -> Dict[str, Any]:
     """`data` is the dict produced by api.FortiGateAPI.collect_raw()."""
+    data = clean_tree(data)  # untrusted: no control characters past this point
     snap = empty_snapshot("api")
     st = data.get("status") or {}
     res = st.get("results") or {}
