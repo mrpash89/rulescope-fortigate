@@ -3,32 +3,58 @@
 {
 	admin off
 	auto_https off
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		max_header_size 16KB
+	}
 }
 
-:80 {
-	root * /srv/rulescope-demo/current
-
-	# Static files only: no uploads, no forms, no API.
-	@write not method GET HEAD
-	respond @write 405
-
-	encode gzip
-
+(security_headers) {
 	header {
-		# Reports and the landing page carry their styles and scripts inline and load nothing else.
-		Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
 		Cross-Origin-Opener-Policy "same-origin"
-		Cache-Control "public, max-age=300"
 		-Server
 	}
+}
 
+:80 {
+	root * /srv/rulescope-demo/current
+	import security_headers
+
+	# The landing page has no script, so none is allowed there. The reports carry their scripts
+	# and styles inline and load nothing else. The two matchers must not overlap.
+	@landing path / /index.html
+	@reports not path / /index.html
+	header @landing Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	header @reports Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+	# The samples describe weaknesses of fictional firewalls: keep them out of search results.
+	@samples path /demo/*
+	header @samples X-Robots-Tag "noindex"
+
+	header Cache-Control "public, max-age=300"
+
+	# Static files only: no uploads, no forms, no API.
+	@write not method GET HEAD
+	handle @write {
+		header Allow "GET, HEAD"
+		header Cache-Control "no-store"
+		respond 405
+	}
+
+	encode gzip
 	file_server
 
 	handle_errors {
+		import security_headers
+		header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		header Cache-Control "no-store"
 		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }

@@ -9,7 +9,8 @@ All notable changes to rulescope. Versions follow `MAJOR.MINOR.PATCH`; the newes
   parser and every output. Deterministic, standard library only, part of the normal test run.
 - `SECURITY.md`, `CONTRIBUTING.md` and this changelog.
 - Demo website (`website/`): a landing page plus live sample output from synthetic configs, built by
-  `website/build.py` as static files, with a Caddy config and a nightly rebuild timer.
+  `website/build.py` as static files, with a Caddy config and a nightly rebuild timer. The rebuild is contained: one user updates the
+  checkout, another builds from it read-only with no network, and the build refuses symbolic links.
 
 ### Fixed
 - Invisible characters that the fixed list in 0.4.1 missed are now replaced with `?` when a config is

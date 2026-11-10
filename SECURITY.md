@@ -42,6 +42,8 @@ Only the latest release gets security fixes. Upgrade before reporting if you can
 - Reports, snapshots or tokens readable by other local users on Linux or macOS.
 - A wrong "clean" result: a risky rule or setting that rulescope reads but does not report. Open a
   normal issue for these unless the detail would help an attacker.
+- The demo website, rulescope.mrpash.com: anything that lets a visitor change what it serves or
+  reach the machine behind it. The site is static files built from synthetic configs.
 
 ## Out of scope
 
