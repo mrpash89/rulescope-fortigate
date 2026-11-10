@@ -21,6 +21,7 @@ import datetime as _dt
 import glob
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -82,17 +83,41 @@ def policy_rows(result: Dict[str, Any], snap: Dict[str, Any]) -> str:
 
 
 def render(template: str, values: Dict[str, str]) -> str:
-    for key, value in values.items():
-        template = template.replace("{{" + key + "}}", value)
-    if "{{" in template:
-        left = template[template.index("{{"):][:40]
-        raise ValueError(f"landing page has an unfilled placeholder: {left}")
-    return template
+    """Fill {{name}} placeholders in one pass, so text inside a value is never expanded again."""
+    def fill(m: "re.Match[str]") -> str:
+        if m.group(1) not in values:
+            raise ValueError(f"landing page has an unfilled placeholder: {m.group(0)}")
+        return values[m.group(1)]
+
+    return re.sub(r"\{\{(\w+)\}\}", fill, template)
+
+
+NOINDEX = '<meta name="robots" content="noindex">'
+
+
+def mark_noindex(folder: str) -> None:
+    """The samples describe weaknesses of fictional firewalls. In search results they would read like
+    a real exposed report, so every sample page asks not to be indexed (the web server also sends
+    X-Robots-Tag for the files that are not HTML)."""
+    for dirpath, _, files in os.walk(folder):
+        for name in files:
+            if not name.endswith(".html"):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, encoding="utf-8") as fh:
+                page = fh.read()
+            head = page.find("<head>")
+            if head < 0:
+                raise RuntimeError(f"{path} has no <head>: cannot mark it noindex")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(page[:head + 6] + NOINDEX + page[head + 6:])
 
 
 def build(release: str, work: str, site_url: str, advisor: Any = None) -> None:
     make_demo.main(work, advisor=advisor)
-    shutil.copytree(os.path.join(work, "site"), os.path.join(release, "demo"))
+    # symlinks=True: a link is copied as a link (and refused below), never as the content of its target
+    shutil.copytree(os.path.join(work, "site"), os.path.join(release, "demo"), symlinks=True)
+    mark_noindex(os.path.join(release, "demo"))
 
     hq = _load(os.path.join(release, "demo", "HQ", "findings.json"))
     hq_snap = _load(sorted(glob.glob(os.path.join(work, "snapshots", "HQ", "*.json")))[-1])
@@ -106,9 +131,9 @@ def build(release: str, work: str, site_url: str, advisor: Any = None) -> None:
             "site_url": escape(site_url.rstrip("/")), "repo_url": REPO_URL, "version": escape(__version__),
             "built": now.strftime("%Y-%m-%d %H:%M"),
             "hq_hostname": escape(hq["device"]["hostname"]), "hq_model": escape(hq["device"]["model"]),
-            "hq_rules": str(len(hq_snap["policies"])), "hq_score": str(hq["score"]),
-            "hq_high": str(hq["severity_counts"]["high"]), "hq_rows": policy_rows(hq, hq_snap),
-            "practices_total": str(hq["practices"]["total"]),
+            "hq_rules": str(len(hq_snap["policies"])), "hq_score": str(int(hq["score"])),
+            "hq_high": str(int(hq["severity_counts"]["high"])), "hq_rows": policy_rows(hq, hq_snap),
+            "practices_total": str(int(hq["practices"]["total"])),
             "south_hostname": escape(south["hostname"]),
             "south_alerts": f'          <ul class="alerts">{alerts}</ul>',
         })
@@ -118,9 +143,9 @@ def build(release: str, work: str, site_url: str, advisor: Any = None) -> None:
     os.makedirs(os.path.join(release, "img"))  # the preview image for links shared in chat and social apps
     shutil.copy(os.path.join(ROOT, "docs", "images", "report-overview.png"), os.path.join(release, "img"))
     with open(os.path.join(release, "robots.txt"), "w", encoding="utf-8") as fh:
-        # The landing page may be indexed. The samples describe weaknesses of fictional firewalls:
-        # keep them out of search results, where they would read like a real exposed report.
-        fh.write("User-agent: *\nDisallow: /demo/\n")
+        # Crawling is allowed everywhere. The samples carry "noindex" instead: a Disallow here would
+        # stop crawlers from ever seeing it, and linked pages could then still be listed.
+        fh.write("User-agent: *\nAllow: /\n")
     os.makedirs(os.path.join(release, ".well-known"))
     with open(os.path.join(release, ".well-known", "security.txt"), "w", encoding="utf-8") as fh:
         fh.write(f"Contact: {REPO_URL}/security/advisories/new\n"
@@ -133,8 +158,12 @@ def build(release: str, work: str, site_url: str, advisor: Any = None) -> None:
         if not os.path.isfile(path) or os.path.getsize(path) == 0:
             raise RuntimeError(f"build is incomplete: {name} is missing or empty")
     # RuleScope writes reports without access for other users. This site is public by design.
-    for dirpath, _, files in os.walk(release):
+    for dirpath, dirs, files in os.walk(release):
         os.chmod(dirpath, 0o755)
+        for name in dirs + files:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path):  # the web server follows links: one could publish a file outside the site
+                raise RuntimeError(f"build contains a symbolic link: {os.path.relpath(path, release)}")
         for name in files:
             os.chmod(os.path.join(dirpath, name), 0o644)
 
