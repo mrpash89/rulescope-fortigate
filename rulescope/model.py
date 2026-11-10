@@ -288,6 +288,10 @@ def empty_snapshot(source: str) -> Dict[str, Any]:
 def upgrade(snap: Dict[str, Any]) -> Dict[str, Any]:
     """Bring older snapshots up to the current schema so diffs and re-analysis keep working.
     Settings that older versions did not collect stay unknown, so their checks are skipped."""
+    for collection in ("policies", "local_in"):
+        for index, policy in enumerate(snap.get(collection, [])):
+            if type(policy.get("policyid")) is not int:
+                raise ValueError(f"{collection}[{index}].policyid must be an integer")
     if snap.get("schema") == SCHEMA:
         return snap
     if snap.get("schema") not in (1, 2):

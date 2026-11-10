@@ -552,8 +552,8 @@ def _inventory(result: Dict[str, Any], snap: Dict[str, Any]) -> str:
                          p["action"], " ".join(tags)]).lower()
         hit_txt = "" if h is None else "{:,}".format(h["hit_count"])
         rows.append(
-            f'<tr id="inv-{p["policyid"]}" data-text="{_e(text)}" data-has="{1 if tags else 0}"{" class=off" if dis else ""}>'
-            f'<td class="num">{seq}</td><td class="num">{p["policyid"]}</td>'
+            f'<tr id="inv-{_e(p["policyid"])}" data-text="{_e(text)}" data-has="{1 if tags else 0}"{" class=off" if dis else ""}>'
+            f'<td class="num">{seq}</td><td class="num">{_e(p["policyid"])}</td>'
             f'<td>{_e(p["name"])}{" <span class=dim>(disabled)</span>" if dis else ""}</td>'
             f'<td>{_e(", ".join(p["srcintf"]))} &rarr; {_e(", ".join(p["dstintf"]))}</td><td>{_e(src)}</td><td>{_e(dst)}</td>'
             f'<td>{_e(svc)}</td><td class="act-{_e(p["action"])}">{_e(p["action"])}</td><td class="num">{hit_txt}</td>'
