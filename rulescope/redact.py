@@ -14,6 +14,7 @@ from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import defaults
+from .hardening import isdb_source_is_known_bad
 
 _PHYS = re.compile(r"^(port\d+|wan\d*|lan\d*|internal\d*|dmz\d*|mgmt\d*|ha\d*|x\d+|[ab]|fortilink|"
                    r"npu\d+_vlink\d+|s\d+|vw\d+|modem|loopback\d*|ssl\.root|any)$", re.I)
@@ -24,15 +25,21 @@ _DEFAULT_PROFILES = {"default", "certificate-inspection", "deep-inspection", "no
 
 
 class _NS:
-    def __init__(self, prefixes: Dict[str, str], default: str, keep: Set[str]):
+    def __init__(self, prefixes: Dict[str, str], default: str, keep: Set[str],
+                 mapping: Optional[Dict[str, str]] = None):
         self.prefixes, self.default, self.keep = prefixes, default, keep
-        self.map: Dict[str, str] = {}
+        self.map: Dict[str, str] = dict(mapping or {})
         self.count: Counter = Counter()
+        for alias in self.map.values():
+            prefix, _, number = alias.rpartition("-")
+            self.count[prefix] = max(self.count[prefix], int(number))
 
     def __call__(self, name: Optional[str]) -> Optional[str]:
-        if not name or name in self.keep:
+        if not name:
             return name
         m = self.map.get(name)
+        if m is None and name in self.keep:
+            return name
         if m is None:
             pre = self.prefixes.get(name, self.default)
             self.count[pre] += 1
@@ -47,8 +54,10 @@ class _IPs:
     """Stand-in addresses: the first 254 from `base` (a /24 prefix such as "203.0.113."), the rest from
     `overflow` (a /16 prefix such as "198.18."), so every pseudonym is a distinct plain host address."""
 
-    def __init__(self, base: str, overflow: str):
-        self.base, self.overflow, self.map, self.n = base, overflow, {}, 0
+    def __init__(self, base: str, overflow: str, mapping: Optional[Dict[str, str]] = None):
+        self.base, self.overflow = base, overflow
+        self.map = dict(mapping or {})
+        self.n = len(self.map)
 
     def __call__(self, ip: str) -> str:
         if not ip:
@@ -65,33 +74,53 @@ class _IPs:
         return self.map[ip]
 
 
-def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, str]]]:
+def redact(snap: Dict[str, Any], mapping: Optional[Dict[str, Dict[str, str]]] = None
+           ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, str]]]:
+    """Redact a snapshot, optionally extending a prior snapshot's pseudonym mapping."""
+    prior = mapping or {}
     s = copy.deepcopy(snap)
     A = _NS({**{n: "ADDR" for n in s["addresses"]}, **{n: "ADDRGRP" for n in s["addrgrps"]},
              **{n: "VIP" for n in s["vips"]}, **{n: "VIPGRP" for n in s["vipgrps"]}}, "OBJ",
-            defaults.DEFAULT_ADDRESSES | defaults.DEFAULT_ADDRGRPS | {"all", "none"})
+            defaults.DEFAULT_ADDRESSES | defaults.DEFAULT_ADDRGRPS | {"all", "none"}, prior.get("addresses"))
     S = _NS({**{n: "SVC" for n in s["services"]}, **{n: "SVCGRP" for n in s["servicegrps"]}}, "SVC",
-            defaults.DEFAULT_SERVICES | defaults.DEFAULT_SERVICEGRPS)
+            defaults.DEFAULT_SERVICES | defaults.DEFAULT_SERVICEGRPS, prior.get("services"))
     ifkeep = {n for n in s["interfaces"] if _PHYS.match(n)} | {"any", "ssl.root", "virtual-wan-link"}
     I = _NS({**{n: "ZONE" for n in s["zones"]}, **{n: "SDWAN" for n in s["sdwan_zones"]},
              **{n: "VPN" for n in s.get("ipsec_p1", {})},
-             **{n: "VPN" for n, i in s["interfaces"].items() if i.get("type") == "tunnel"}}, "IF", ifkeep)
+             **{n: "VPN" for n, i in s["interfaces"].items() if i.get("type") == "tunnel"}}, "IF", ifkeep,
+            prior.get("interfaces"))
     U = _NS({**{n: "ADMIN" for n in (s.get("admins") or {})}, **{n: "API" for n in (s.get("api_users") or {})}},
-            "USERGRP", {"admin"})
-    T = _NS({}, "SCHED", {"always", "none"})
-    P = _NS({}, "PROFILE", _DEFAULT_PROFILES)
-    P2 = _NS({}, "P2", set())
-    POOL = _NS({}, "POOL", set())
+            "USERGRP", {"admin"}, prior.get("users"))
+    T = _NS({}, "SCHED", {"always", "none"}, prior.get("schedules"))
+    P = _NS({}, "PROFILE", _DEFAULT_PROFILES, prior.get("profiles"))
+    P2 = _NS({}, "P2", set(), prior.get("phase2"))
+    POOL = _NS({}, "POOL", set(), prior.get("pools"))
+    VDOM = _NS({}, "VDOM", {"root"}, prior.get("vdoms"))
+    ISDB = _NS({}, "ISDB", set(), prior.get("internet_services"))
     # documentation ranges first, then the benchmarking range 198.18.0.0/15 (one /16 each)
-    EXT, MAPPED, PEER = _IPs("203.0.113.", "198.18."), _IPs("10.255.0.", "10.254."), _IPs("198.51.100.", "198.19.")
+    EXT = _IPs("203.0.113.", "198.18.", prior.get("external_ips"))
+    MAPPED = _IPs("10.255.0.", "10.254.", prior.get("mapped_ips"))
+    PEER = _IPs("198.51.100.", "198.19.", prior.get("vpn_peers"))
 
     s["device"]["hostname"] = "FIREWALL"
     s["device"]["serial"] = ""
+    s["device"]["vdom"] = VDOM(s["device"].get("vdom"))
+    usage_source = s.get("usage_source") or ""
+    if usage_source.startswith("import:"):
+        s["usage_source"] = "import:redacted"
+    # A snapshot can contain notes from several imports, not just its latest usage source.
+    s["notes"] = ["Usage imported from redacted: " + note.rsplit(": ", 1)[-1]
+                  if note.startswith("Usage imported from ") else note for note in s.get("notes", [])]
     for p in s["policies"]:
+        p["_redacted_isdb_bad_source"] = isdb_source_is_known_bad(p)
         p["srcintf"], p["dstintf"] = I.many(p["srcintf"]), I.many(p["dstintf"])
         for f in ("srcaddr", "dstaddr", "srcaddr6", "dstaddr6"):
             p[f] = A.many(p[f])
         p["service"] = S.many(p["service"])
+        for direction in ("internet-service", "internet-service-src"):
+            for kind in ("group", "custom", "custom-group"):
+                field = direction + "-" + kind
+                p[field] = ISDB.many(p.get(field, []))
         for f in ("users", "groups", "fsso-groups"):
             p[f] = U.many(p[f])
         p["poolname"] = POOL.many(p["poolname"])
@@ -115,7 +144,8 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
     s["vipgrps"] = {A(n): A.many(m) for n, m in s["vipgrps"].items()}
     s["zones"] = {I(n): I.many(m) for n, m in s["zones"].items()}
     s["sdwan_zones"] = {I(n): I.many(m) for n, m in s["sdwan_zones"].items()}
-    s["interfaces"] = {I(n): dict(v, name=I(n), alias="", ip="0.0.0.0 0.0.0.0") for n, v in s["interfaces"].items()}
+    s["interfaces"] = {I(n): dict(v, name=I(n), alias="", ip="0.0.0.0 0.0.0.0", vdom=VDOM(v.get("vdom")))
+                       for n, v in s["interfaces"].items()}
     sch = s.get("schedules") or {"onetime": {}, "groups": {}}
     s["schedules"] = {"onetime": {T(n): dict(v, name=T(n)) for n, v in sch.get("onetime", {}).items()},
                       "groups": {T(n): T.many(m) for n, m in sch.get("groups", {}).items()}}
@@ -138,9 +168,10 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
         objs = set(snap["addresses"]) | set(snap["addrgrps"]) | set(snap["vips"]) | set(snap["vipgrps"])
         s["references"] = {(A(k) if k in objs else S(k)): v for k, v in s["references"].items()}
     CERT = _NS({}, "CERT", {"", "Fortinet_Factory", "Fortinet_Factory_Backup", "self-sign", "Fortinet_SSL",
-                            "Fortinet_GUI_Server"})
-    ACC = _NS({}, "ACCPROFILE", {"super_admin", "super_admin_readonly", "prof_admin", "", None})
-    MISC = _NS({}, "NAME", {"full-access", "tunnel-access", "web-access"})
+                            "Fortinet_GUI_Server"}, prior.get("certificates"))
+    ACC = _NS({}, "ACCPROFILE", {"super_admin", "super_admin_readonly", "prof_admin", "", None},
+              prior.get("admin_profiles"))
+    MISC = _NS({}, "NAME", {"full-access", "tunnel-access", "web-access"}, prior.get("other_names"))
     for coll in ("admins", "api_users"):
         for v in (s.get(coll) or {}).values():
             v["accprofile"] = ACC(v.get("accprofile"))
@@ -180,5 +211,6 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
     mapping = {"addresses": A.map, "services": S.map, "interfaces": I.map, "users": U.map, "schedules": T.map,
                "profiles": P.map, "phase2": P2.map, "pools": POOL.map, "external_ips": EXT.map,
                "mapped_ips": MAPPED.map, "vpn_peers": PEER.map, "certificates": CERT.map, "admin_profiles": ACC.map,
-               "other_names": MISC.map, "hostname": {snap["device"].get("hostname", ""): "FIREWALL"}}
+               "other_names": MISC.map, "vdoms": VDOM.map, "internet_services": ISDB.map,
+               "hostname": {**prior.get("hostname", {}), snap["device"].get("hostname", ""): "FIREWALL"}}
     return s, mapping
