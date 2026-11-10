@@ -10,10 +10,18 @@ from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 from . import defaults, exposure, firmware, hardening, practices
 from .catalog import (AREAS, CHECKS, EFFORT, INTRODUCED_0_4, RATIO_CHECKS, REMOVABLE_CHECKS, SEVERITY_ORDER,
                       compliance_refs, disable_cli, finding, label, q)
-from .model import iso_epoch
+from .model import iso_epoch, upgrade
 from .resolve import AddrSet, Resolver, SvcSet
 
 PERMIT = ("accept", "ipsec")
+COVERAGE_CHECKS = {"REDUNDANT", "SHADOW_CONFLICT", "SHADOW_DEAD"}
+_MATCH_CHECKS = COVERAGE_CHECKS | {"ANY_ANY", "OUTBOUND_UNRESTRICTED", "SERVICE_ALL"}
+_NEGATIONS = ("srcaddr-negate", "dstaddr-negate", "service-negate")
+
+
+def _coverage_skipped(p: Dict[str, Any]) -> bool:
+    return p.get("unsupported_match") != [] or any(p.get(k) == "enable" for k in _NEGATIONS)
+
 
 
 # ---------------------------------------------------------------- matching model
@@ -46,7 +54,7 @@ def _build_match(p: Dict[str, Any], r: Resolver) -> Match:
             return None
         return {f"{f}:{v}" for f in fields for v in p.get(f, [])}
 
-    skip = any(p.get(k) == "enable" for k in ("srcaddr-negate", "dstaddr-negate", "service-negate"))
+    skip = _coverage_skipped(p)
     return Match(
         p=p, src_if=r.interfaces(p["srcintf"]), dst_if=r.interfaces(p["dstintf"]),
         src=r.addresses(p["srcaddr"]), dst=r.addresses(p["dstaddr"]), svc=r.services(p["service"]),
@@ -549,9 +557,12 @@ def finding_key(f: Dict[str, Any]) -> Tuple[str, str, str]:
 def compare(now: Dict[str, Any], before: Dict[str, Any]) -> Dict[str, Any]:
     """Resolved / new findings, counting only checks evaluated in both runs (a check added in a newer
     version, or one whose data the older run could not read, must not show up as 'new')."""
-    ev_now = set(now.get("evaluated") or CHECKS)
+    ev_now = set(now["evaluated"]) if now.get("evaluated") is not None else set(CHECKS) - INTRODUCED_0_4
     ev_before = set(before["evaluated"]) if before.get("evaluated") is not None else set(CHECKS) - INTRODUCED_0_4
     both = ev_now & ev_before
+    # Older findings JSON may claim these checks ran, but lacked complete match inputs.
+    if now.get("policy_coverage_complete") is not True or before.get("policy_coverage_complete") is not True:
+        both -= _MATCH_CHECKS
     b = {finding_key(f): f for f in before["findings"] if f["check"] in both}
     n = {finding_key(f): f for f in now["findings"] if f["check"] in both}
     slim = lambda f: {k: f.get(k) for k in ("check", "severity", "title", "policyid", "object", "detail")}  # noqa: E731
@@ -580,6 +591,16 @@ def analysis_notes(snap: Dict[str, Any], wan: Set[str]) -> List[str]:
     if not wan:
         notes.append("No internet-facing interface was identified (no WAN role, SD-WAN member, default route or "
                      "VIP external interface); exposure checks may be incomplete. Set them with --wan.")
+    enabled = [p for p in snap["policies"] if p["status"] == "enable"]
+    unknown = sum(p.get("unsupported_match") is None for p in enabled)
+    unsupported = sorted({f for p in enabled for f in (p.get("unsupported_match") or [])}
+                         | {f for p in enabled for f in _NEGATIONS if p.get(f) == "enable"})
+    if unknown:
+        notes.append(f"Policy coverage is unknown for {unknown} enabled policies: older snapshots did not preserve "
+                     "unsupported match criteria. Recollect to assess redundancy, shadowing and broad matches; other checks continue.")
+    if unsupported:
+        notes.append("Redundancy, shadowing and broad-match checks exclude policies with unsupported match criteria: "
+                     + ", ".join(unsupported) + ". No coverage-based cleanup is suggested for those policies.")
     return notes + list(snap.get("notes", []))
 
 
@@ -587,6 +608,7 @@ def analyze(snap: Dict[str, Any], stale_days: int = 90, baseline: Optional[Dict[
             advisories: Optional[Dict[str, Any]] = None, lifecycle_table: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """`baseline` is an earlier snapshot or an earlier analysis result (findings JSON).
     `advisories` is the result of firmware.AdvisoryClient.lookup() for this device's version (None: not checked)."""
+    snap = upgrade(snap)
     today = snap["collected_at"][:10]
     now = iso_epoch(snap["collected_at"])
     r = Resolver(snap)
@@ -612,6 +634,10 @@ def analyze(snap: Dict[str, Any], stale_days: int = 90, baseline: Optional[Dict[
     st["exposed_risky"] = sum(1 for f in findings if f["check"] == "EXPOSED_RISKY")
     sc = score(findings, st)
     sev_counts = Counter(f["severity"] for f in findings)
+    coverage_complete = all(not _coverage_skipped(p) for p in snap["policies"] if p["status"] == "enable")
+    evaluated = hardening.evaluated(snap, fw)
+    if not coverage_complete:
+        evaluated -= _MATCH_CHECKS
     result = {
         "tool": "rulescope", "device": snap["device"], "source": snap["source"],
         "collected_at": snap["collected_at"], "counter_since": snap.get("counter_since"),
@@ -620,7 +646,7 @@ def analyze(snap: Dict[str, Any], stale_days: int = 90, baseline: Optional[Dict[
         "severity_counts": {k: sev_counts.get(k, 0) for k in SEVERITY_ORDER},
         **sc, "cleanup": cleanup(snap, findings), "top_actions": top_actions(findings),
         "quick_wins": quick_wins(findings), "exposure": exp_rows, "findings": findings,
-        "evaluated": sorted(hardening.evaluated(snap, fw)), "firmware": fw,
+        "evaluated": sorted(evaluated), "policy_coverage_complete": coverage_complete, "firmware": fw,
         "change_log": (snap.get("change_log") or [])[:50],
     }
     result["practices"] = practices.evaluate(snap, result, wan)
