@@ -1,4 +1,5 @@
 import copy
+import datetime
 import io
 import json
 import os
@@ -7,8 +8,10 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +28,11 @@ from rulescope.resolve import Resolver  # noqa: E402
 from rulescope.safety import clean  # noqa: E402
 
 SAMPLE = os.path.join(HERE, "sample.conf")
+
+
+# The day the sample config is judged on. Lifecycle results (supported, end of support soon, ...) depend on
+# the date, so tests that check them must not use the day they happen to run.
+AUDIT_DAY = "2026-11-05"
 
 
 def load_sample():
@@ -167,6 +175,7 @@ class AnalysisTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.snap = model.from_config(load_sample())
+        cls.snap["collected_at"] = AUDIT_DAY + "T12:00:00+00:00"   # firmware results depend on the date
         cls.res = checks.analyze(cls.snap)
         cls.f = by_check(cls.res)
 
@@ -517,6 +526,7 @@ class HardeningTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.snap = model.from_config(load_sample())
+        cls.snap["collected_at"] = AUDIT_DAY + "T12:00:00+00:00"   # firmware results depend on the date
         cls.res = checks.analyze(cls.snap)
         cls.f = by_check(cls.res)
 
@@ -755,11 +765,21 @@ class FirmwareTests(unittest.TestCase):
             shutil.rmtree(tmp)
 
     def test_firmware_cli(self):
-        out = io.StringIO()
-        with redirect_stdout(out):
-            self.assertEqual(cli.main(["firmware", "7.2.10", "7.4.3", "--advisories", "off"]), 0)
-        self.assertIn("FortiOS 7.2.10: branch 7.2, status eos", out.getvalue())
-        self.assertIn("FortiOS 7.4.3: branch 7.4, status supported", out.getvalue())
+        def run_on(day):
+            # the command judges versions as of today: fix "today" so the result does not change over time
+            fixed = types.ModuleType("datetime")
+            fixed.__dict__.update(datetime.__dict__)
+            fixed.date = type("FixedDate", (datetime.date,), {"today": classmethod(lambda cls: cls.fromisoformat(day))})
+            out = io.StringIO()
+            with mock.patch.object(cli, "_dt", fixed), redirect_stdout(out):
+                self.assertEqual(cli.main(["firmware", "7.2.10", "7.4.3", "--advisories", "off"]), 0)
+            return out.getvalue()
+
+        out = run_on(AUDIT_DAY)
+        self.assertIn("FortiOS 7.2.10: branch 7.2, status eos", out)
+        self.assertIn("FortiOS 7.4.3: branch 7.4, status supported", out)
+        # 180 days before the end of engineering support (2027-05-11) the status changes
+        self.assertIn("FortiOS 7.4.3: branch 7.4, status eoes_soon", run_on("2026-11-15"))
 
 
 def _cve(i, score, kev=False):
