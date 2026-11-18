@@ -40,12 +40,27 @@ All screenshots come from the demo site in [`examples/demo-site`](examples/demo-
 
 ## Install
 
+You need Python 3.9 or later. RuleScope uses only the standard library, so there is nothing else to install.
+
+**Run it without installing** (to try it out, or to use it from a folder):
+
 ```bash
-python3 -m pip install .          # or: pipx install .
+git clone https://github.com/mrpash89/rulescope-fortigate.git
+cd rulescope-fortigate
+python3 -m rulescope --version
+```
+
+**Install it as a command** (then `rulescope ...` works from any folder):
+
+```bash
+pipx install git+https://github.com/mrpash89/rulescope-fortigate.git
+pipx ensurepath                   # once, if pipx says its folder is not on your PATH; then open a new terminal
 rulescope --version
 ```
 
-No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.2.pyz ...`.
+`pipx` keeps RuleScope in its own environment. On Debian and Ubuntu, install it with `sudo apt install pipx`. Plain `pip install` into the system Python is refused there by design.
+
+The examples below use `rulescope ...`. Without installing, type `python3 -m rulescope ...` in the cloned folder instead.
 
 ## 1. Read-only API user on the FortiGate
 
